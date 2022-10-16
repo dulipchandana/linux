@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * J-Core SPI controller driver
  *
@@ -81,7 +82,8 @@ static void jcore_spi_chipsel(struct spi_device *spi, bool value)
 
 static void jcore_spi_baudrate(struct jcore_spi *hw, int speed)
 {
-	if (speed == hw->speed_hz) return;
+	if (speed == hw->speed_hz)
+		return;
 	hw->speed_hz = speed;
 	if (speed >= hw->clock_freq / 2)
 		hw->speed_reg = 0;
@@ -169,7 +171,7 @@ static int jcore_spi_probe(struct platform_device *pdev)
 	if (!devm_request_mem_region(&pdev->dev, res->start,
 				     resource_size(res), pdev->name))
 		goto exit_busy;
-	hw->base = devm_ioremap_nocache(&pdev->dev, res->start,
+	hw->base = devm_ioremap(&pdev->dev, res->start,
 					resource_size(res));
 	if (!hw->base)
 		goto exit_busy;
@@ -184,10 +186,11 @@ static int jcore_spi_probe(struct platform_device *pdev)
 	 */
 	clock_freq = 50000000;
 	clk = devm_clk_get(&pdev->dev, "ref_clk");
-	if (!IS_ERR_OR_NULL(clk)) {
-		if (clk_enable(clk) == 0)
+	if (!IS_ERR(clk)) {
+		if (clk_prepare_enable(clk) == 0) {
 			clock_freq = clk_get_rate(clk);
-		else
+			clk_disable_unprepare(clk);
+		} else
 			dev_warn(&pdev->dev, "could not enable ref_clk\n");
 	}
 	hw->clock_freq = clock_freq;
@@ -198,10 +201,8 @@ static int jcore_spi_probe(struct platform_device *pdev)
 
 	/* Register our spi controller */
 	err = devm_spi_register_master(&pdev->dev, master);
-	if (err) {
-		clk_disable(clk);
+	if (err)
 		goto exit;
-	}
 
 	return 0;
 

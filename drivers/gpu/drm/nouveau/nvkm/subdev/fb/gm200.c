@@ -49,8 +49,6 @@ gm200_fb_init(struct nvkm_fb *base)
 	if (fb->r100c10_page)
 		nvkm_wr32(device, 0x100c10, fb->r100c10 >> 8);
 
-	nvkm_mask(device, 0x100c80, 0x00000001, 0x00000000); /* 128KiB lpg */
-
 	nvkm_wr32(device, 0x100cc8, nvkm_memory_addr(fb->base.mmu_wr) >> 8);
 	nvkm_wr32(device, 0x100ccc, nvkm_memory_addr(fb->base.mmu_rd) >> 8);
 	nvkm_mask(device, 0x100cc4, 0x00060000,
@@ -69,7 +67,7 @@ gm200_fb = {
 };
 
 int
-gm200_fb_new(struct nvkm_device *device, int index, struct nvkm_fb **pfb)
+gm200_fb_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst, struct nvkm_fb **pfb)
 {
-	return gf100_fb_new_(&gm200_fb, device, index, pfb);
+	return gf100_fb_new_(&gm200_fb, device, type, inst, pfb);
 }

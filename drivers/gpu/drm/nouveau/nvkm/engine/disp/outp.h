@@ -1,10 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: MIT */
 #ifndef __NVKM_DISP_OUTP_H__
 #define __NVKM_DISP_OUTP_H__
-#include <engine/disp.h>
+#include "priv.h"
+#include <core/notify.h>
 
 #include <subdev/bios.h>
 #include <subdev/bios/dcb.h>
+#include <subdev/bios/dp.h>
 
 struct nvkm_outp {
 	const struct nvkm_outp_func *func;
@@ -13,26 +15,55 @@ struct nvkm_outp {
 	struct dcb_output info;
 
 	struct nvkm_i2c_bus *i2c;
-	int or;
 
 	struct list_head head;
 	struct nvkm_conn *conn;
+	bool identity;
 
 	/* Assembly state. */
 #define NVKM_OUTP_PRIV 1
 #define NVKM_OUTP_USER 2
 	u8 acquired:2;
 	struct nvkm_ior *ior;
+
+	union {
+		struct {
+			struct nvbios_dpout info;
+			u8 version;
+
+			struct nvkm_i2c_aux *aux;
+
+			struct nvkm_notify hpd;
+			bool present;
+			u8 lttpr[6];
+			u8 lttprs;
+			u8 dpcd[16];
+
+			struct {
+				int dpcd; /* -1, or index into SUPPORTED_LINK_RATES table */
+				u32 rate;
+			} rate[8];
+			int rates;
+			int links;
+
+			struct mutex mutex;
+			struct {
+				atomic_t done;
+				bool mst;
+			} lt;
+		} dp;
+	};
+
+	struct nvkm_object object;
 };
 
-int nvkm_outp_ctor(const struct nvkm_outp_func *, struct nvkm_disp *,
-		   int index, struct dcb_output *, struct nvkm_outp *);
-int nvkm_outp_new(struct nvkm_disp *, int index, struct dcb_output *,
-		  struct nvkm_outp **);
+int nvkm_outp_new_(const struct nvkm_outp_func *, struct nvkm_disp *, int index,
+		   struct dcb_output *, struct nvkm_outp **);
+int nvkm_outp_new(struct nvkm_disp *, int index, struct dcb_output *, struct nvkm_outp **);
 void nvkm_outp_del(struct nvkm_outp **);
 void nvkm_outp_init(struct nvkm_outp *);
 void nvkm_outp_fini(struct nvkm_outp *);
-int nvkm_outp_acquire(struct nvkm_outp *, u8 user);
+int nvkm_outp_acquire(struct nvkm_outp *, u8 user, bool hda);
 void nvkm_outp_release(struct nvkm_outp *, u8 user);
 void nvkm_outp_route(struct nvkm_disp *);
 
@@ -41,7 +72,8 @@ struct nvkm_outp_func {
 	void (*init)(struct nvkm_outp *);
 	void (*fini)(struct nvkm_outp *);
 	int (*acquire)(struct nvkm_outp *);
-	void (*release)(struct nvkm_outp *, struct nvkm_ior *);
+	void (*release)(struct nvkm_outp *);
+	void (*disable)(struct nvkm_outp *, struct nvkm_ior *);
 };
 
 #define OUTP_MSG(o,l,f,a...) do {                                              \

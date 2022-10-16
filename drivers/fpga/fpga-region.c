@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * FPGA Region - Device Tree support for FPGA programming under Linux
+ * FPGA Region - Support for FPGA programming under Linux
  *
  *  Copyright (C) 2013-2016 Altera Corporation
  *  Copyright (C) 2017 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
 #include <linux/fpga/fpga-bridge.h>
 #include <linux/fpga/fpga-mgr.h>
 #include <linux/fpga/fpga-region.h>
@@ -30,9 +18,9 @@
 static DEFINE_IDA(fpga_region_ida);
 static struct class *fpga_region_class;
 
-struct fpga_region *fpga_region_class_find(
-	struct device *start, const void *data,
-	int (*match)(struct device *, const void *))
+struct fpga_region *
+fpga_region_class_find(struct device *start, const void *data,
+		       int (*match)(struct device *, const void *))
 {
 	struct device *dev;
 
@@ -45,14 +33,14 @@ struct fpga_region *fpga_region_class_find(
 EXPORT_SYMBOL_GPL(fpga_region_class_find);
 
 /**
- * fpga_region_get - get an exclusive reference to a fpga region
+ * fpga_region_get - get an exclusive reference to an fpga region
  * @region: FPGA Region struct
  *
  * Caller should call fpga_region_put() when done with region.
  *
  * Return fpga_region struct if successful.
  * Return -EBUSY if someone already has a reference to the region.
- * Return -ENODEV if @np is not a FPGA Region.
+ * Return -ENODEV if @np is not an FPGA Region.
  */
 static struct fpga_region *fpga_region_get(struct fpga_region *region)
 {
@@ -93,8 +81,16 @@ static void fpga_region_put(struct fpga_region *region)
 
 /**
  * fpga_region_program_fpga - program FPGA
+ *
  * @region: FPGA region
+ *
  * Program an FPGA using fpga image info (region->info).
+ * If the region has a get_bridges function, the exclusive reference for the
+ * bridges will be held if programming succeeds.  This is intended to prevent
+ * reprogramming the region until the caller considers it safe to do so.
+ * The caller will need to call fpga_bridges_put() before attempting to
+ * reprogram the region.
+ *
  * Return 0 for success or negative error code.
  */
 int fpga_region_program_fpga(struct fpga_region *region)
@@ -162,45 +158,124 @@ err_put_region:
 }
 EXPORT_SYMBOL_GPL(fpga_region_program_fpga);
 
-int fpga_region_register(struct device *dev, struct fpga_region *region)
+static ssize_t compat_id_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
 {
+	struct fpga_region *region = to_fpga_region(dev);
+
+	if (!region->compat_id)
+		return -ENOENT;
+
+	return sprintf(buf, "%016llx%016llx\n",
+		       (unsigned long long)region->compat_id->id_h,
+		       (unsigned long long)region->compat_id->id_l);
+}
+
+static DEVICE_ATTR_RO(compat_id);
+
+static struct attribute *fpga_region_attrs[] = {
+	&dev_attr_compat_id.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(fpga_region);
+
+/**
+ * fpga_region_register_full - create and register an FPGA Region device
+ * @parent: device parent
+ * @info: parameters for FPGA Region
+ *
+ * Return: struct fpga_region or ERR_PTR()
+ */
+struct fpga_region *
+fpga_region_register_full(struct device *parent, const struct fpga_region_info *info)
+{
+	struct fpga_region *region;
 	int id, ret = 0;
 
-	id = ida_simple_get(&fpga_region_ida, 0, 0, GFP_KERNEL);
-	if (id < 0)
-		return id;
+	if (!info) {
+		dev_err(parent,
+			"Attempt to register without required info structure\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	region = kzalloc(sizeof(*region), GFP_KERNEL);
+	if (!region)
+		return ERR_PTR(-ENOMEM);
+
+	id = ida_alloc(&fpga_region_ida, GFP_KERNEL);
+	if (id < 0) {
+		ret = id;
+		goto err_free;
+	}
+
+	region->mgr = info->mgr;
+	region->compat_id = info->compat_id;
+	region->priv = info->priv;
+	region->get_bridges = info->get_bridges;
 
 	mutex_init(&region->mutex);
 	INIT_LIST_HEAD(&region->bridge_list);
-	device_initialize(&region->dev);
-	region->dev.groups = region->groups;
+
 	region->dev.class = fpga_region_class;
-	region->dev.parent = dev;
-	region->dev.of_node = dev->of_node;
+	region->dev.parent = parent;
+	region->dev.of_node = parent->of_node;
 	region->dev.id = id;
-	dev_set_drvdata(dev, region);
 
 	ret = dev_set_name(&region->dev, "region%d", id);
 	if (ret)
 		goto err_remove;
 
-	ret = device_add(&region->dev);
-	if (ret)
-		goto err_remove;
+	ret = device_register(&region->dev);
+	if (ret) {
+		put_device(&region->dev);
+		return ERR_PTR(ret);
+	}
 
-	return 0;
+	return region;
 
 err_remove:
-	ida_simple_remove(&fpga_region_ida, id);
-	return ret;
+	ida_free(&fpga_region_ida, id);
+err_free:
+	kfree(region);
+
+	return ERR_PTR(ret);
+}
+EXPORT_SYMBOL_GPL(fpga_region_register_full);
+
+/**
+ * fpga_region_register - create and register an FPGA Region device
+ * @parent: device parent
+ * @mgr: manager that programs this region
+ * @get_bridges: optional function to get bridges to a list
+ *
+ * This simple version of the register function should be sufficient for most users.
+ * The fpga_region_register_full() function is available for users that need to
+ * pass additional, optional parameters.
+ *
+ * Return: struct fpga_region or ERR_PTR()
+ */
+struct fpga_region *
+fpga_region_register(struct device *parent, struct fpga_manager *mgr,
+		     int (*get_bridges)(struct fpga_region *))
+{
+	struct fpga_region_info info = { 0 };
+
+	info.mgr = mgr;
+	info.get_bridges = get_bridges;
+
+	return fpga_region_register_full(parent, &info);
 }
 EXPORT_SYMBOL_GPL(fpga_region_register);
 
-int fpga_region_unregister(struct fpga_region *region)
+/**
+ * fpga_region_unregister - unregister an FPGA region
+ * @region: FPGA region
+ *
+ * This function is intended for use in an FPGA region driver's remove function.
+ */
+void fpga_region_unregister(struct fpga_region *region)
 {
 	device_unregister(&region->dev);
-
-	return 0;
 }
 EXPORT_SYMBOL_GPL(fpga_region_unregister);
 
@@ -208,7 +283,8 @@ static void fpga_region_dev_release(struct device *dev)
 {
 	struct fpga_region *region = to_fpga_region(dev);
 
-	ida_simple_remove(&fpga_region_ida, region->dev.id);
+	ida_free(&fpga_region_ida, region->dev.id);
+	kfree(region);
 }
 
 /**
@@ -221,6 +297,7 @@ static int __init fpga_region_init(void)
 	if (IS_ERR(fpga_region_class))
 		return PTR_ERR(fpga_region_class);
 
+	fpga_region_class->dev_groups = fpga_region_groups;
 	fpga_region_class->dev_release = fpga_region_dev_release;
 
 	return 0;

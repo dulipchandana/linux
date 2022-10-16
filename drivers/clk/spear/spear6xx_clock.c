@@ -1,15 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SPEAr6xx machines clock framework source file
  *
  * Copyright (C) 2012 ST Microelectronics
  * Viresh Kumar <vireshk@kernel.org>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clkdev.h>
+#include <linux/clk/spear.h>
 #include <linux/io.h>
 #include <linux/spinlock_types.h>
 #include "clk.h"
@@ -147,7 +145,7 @@ void __init spear6xx_clk_init(void __iomem *misc_base)
 
 	clk = clk_register_fixed_factor(NULL, "wdt_clk", "osc_30m_clk", 0, 1,
 			1);
-	clk_register_clkdev(clk, NULL, "wdt");
+	clk_register_clkdev(clk, NULL, "fc880000.wdt");
 
 	/* clock derived from pll1 clk */
 	clk = clk_register_fixed_factor(NULL, "cpu_clk", "pll1_clk",

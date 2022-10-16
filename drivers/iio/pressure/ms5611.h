@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * MS5611 pressure and temperature sensor driver
  *
  * Copyright (c) Tomasz Duszynski <tduszyns@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  */
 
@@ -53,9 +50,9 @@ struct ms5611_state {
 	const struct ms5611_osr *pressure_osr;
 	const struct ms5611_osr *temp_osr;
 
-	int (*reset)(struct device *dev);
-	int (*read_prom_word)(struct device *dev, int index, u16 *word);
-	int (*read_adc_temp_and_pressure)(struct device *dev,
+	int (*reset)(struct ms5611_state *st);
+	int (*read_prom_word)(struct ms5611_state *st, int index, u16 *word);
+	int (*read_adc_temp_and_pressure)(struct ms5611_state *st,
 					  s32 *temp, s32 *pressure);
 
 	struct ms5611_chip_info *chip_info;
@@ -63,7 +60,7 @@ struct ms5611_state {
 };
 
 int ms5611_probe(struct iio_dev *indio_dev, struct device *dev,
-                 const char* name, int type);
-int ms5611_remove(struct iio_dev *indio_dev);
+		 const char *name, int type);
+void ms5611_remove(struct iio_dev *indio_dev);
 
 #endif /* _MS5611_H */

@@ -14,23 +14,26 @@ static const char *__doc__ = " XDP RX-queue info extract example\n\n"
 #include <string.h>
 #include <unistd.h>
 #include <locale.h>
-#include <sys/resource.h>
 #include <getopt.h>
 #include <net/if.h>
 #include <time.h>
-
+#include <limits.h>
 #include <arpa/inet.h>
 #include <linux/if_link.h>
 
-#include "libbpf.h"
-#include "bpf_load.h"
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 #include "bpf_util.h"
 
 static int ifindex = -1;
 static char ifname_buf[IF_NAMESIZE];
 static char *ifname;
+static __u32 prog_id;
 
-static __u32 xdp_flags;
+static __u32 xdp_flags = XDP_FLAGS_UPDATE_IF_NOEXIST;
+
+static struct bpf_map *stats_global_map;
+static struct bpf_map *rx_queue_index_map;
 
 /* Exit return codes */
 #define EXIT_OK		0
@@ -40,6 +43,9 @@ static __u32 xdp_flags;
 #define EXIT_FAIL_BPF		4
 #define EXIT_FAIL_MEM		5
 
+#define FAIL_MEM_SIG		INT_MAX
+#define FAIL_STAT_SIG		(INT_MAX - 1)
+
 static const struct option long_options[] = {
 	{"help",	no_argument,		NULL, 'h' },
 	{"dev",		required_argument,	NULL, 'd' },
@@ -47,22 +53,50 @@ static const struct option long_options[] = {
 	{"sec",		required_argument,	NULL, 's' },
 	{"no-separators", no_argument,		NULL, 'z' },
 	{"action",	required_argument,	NULL, 'a' },
+	{"readmem",	no_argument,		NULL, 'r' },
+	{"swapmac",	no_argument,		NULL, 'm' },
+	{"force",	no_argument,		NULL, 'F' },
 	{0, 0, NULL,  0 }
 };
 
 static void int_exit(int sig)
 {
-	fprintf(stderr,
-		"Interrupted: Removing XDP program on ifindex:%d device:%s\n",
-		ifindex, ifname);
-	if (ifindex > -1)
-		bpf_set_link_xdp_fd(ifindex, -1, xdp_flags);
+	__u32 curr_prog_id = 0;
+
+	if (ifindex > -1) {
+		if (bpf_xdp_query_id(ifindex, xdp_flags, &curr_prog_id)) {
+			printf("bpf_xdp_query_id failed\n");
+			exit(EXIT_FAIL);
+		}
+		if (prog_id == curr_prog_id) {
+			fprintf(stderr,
+				"Interrupted: Removing XDP program on ifindex:%d device:%s\n",
+				ifindex, ifname);
+			bpf_xdp_detach(ifindex, xdp_flags, NULL);
+		} else if (!curr_prog_id) {
+			printf("couldn't find a prog id on a given iface\n");
+		} else {
+			printf("program on interface changed, not removing\n");
+		}
+	}
+
+	if (sig == FAIL_MEM_SIG)
+		exit(EXIT_FAIL_MEM);
+	else if (sig == FAIL_STAT_SIG)
+		exit(EXIT_FAIL);
+
 	exit(EXIT_OK);
 }
 
 struct config {
 	__u32 action;
 	int ifindex;
+	__u32 options;
+};
+enum cfg_options_flags {
+	NO_TOUCH = 0x0U,
+	READ_MEM = 0x1U,
+	SWAP_MAC = 0x2U,
 };
 #define XDP_ACTION_MAX (XDP_TX + 1)
 #define XDP_ACTION_MAX_STRLEN 11
@@ -106,6 +140,19 @@ static void list_xdp_actions(void)
 	printf("\n");
 }
 
+static char* options2str(enum cfg_options_flags flag)
+{
+	if (flag == NO_TOUCH)
+		return "no_touch";
+	if (flag & SWAP_MAC)
+		return "swapmac";
+	if (flag & READ_MEM)
+		return "read";
+	fprintf(stderr, "ERR: Unknown config option flags");
+	int_exit(FAIL_STAT_SIG);
+	return "unknown";
+}
+
 static void usage(char *argv[])
 {
 	int i;
@@ -136,7 +183,7 @@ static __u64 gettime(void)
 	res = clock_gettime(CLOCK_MONOTONIC, &t);
 	if (res < 0) {
 		fprintf(stderr, "Error with gettimeofday! (%i)\n", res);
-		exit(EXIT_FAIL);
+		int_exit(FAIL_STAT_SIG);
 	}
 	return (__u64) t.tv_sec * NANOSEC_PER_SEC + t.tv_nsec;
 }
@@ -160,45 +207,38 @@ static struct datarec *alloc_record_per_cpu(void)
 {
 	unsigned int nr_cpus = bpf_num_possible_cpus();
 	struct datarec *array;
-	size_t size;
 
-	size = sizeof(struct datarec) * nr_cpus;
-	array = malloc(size);
-	memset(array, 0, size);
+	array = calloc(nr_cpus, sizeof(struct datarec));
 	if (!array) {
 		fprintf(stderr, "Mem alloc error (nr_cpus:%u)\n", nr_cpus);
-		exit(EXIT_FAIL_MEM);
+		int_exit(FAIL_MEM_SIG);
 	}
 	return array;
 }
 
 static struct record *alloc_record_per_rxq(void)
 {
-	unsigned int nr_rxqs = map_data[2].def.max_entries;
+	unsigned int nr_rxqs = bpf_map__max_entries(rx_queue_index_map);
 	struct record *array;
-	size_t size;
 
-	size = sizeof(struct record) * nr_rxqs;
-	array = malloc(size);
-	memset(array, 0, size);
+	array = calloc(nr_rxqs, sizeof(struct record));
 	if (!array) {
 		fprintf(stderr, "Mem alloc error (nr_rxqs:%u)\n", nr_rxqs);
-		exit(EXIT_FAIL_MEM);
+		int_exit(FAIL_MEM_SIG);
 	}
 	return array;
 }
 
 static struct stats_record *alloc_stats_record(void)
 {
-	unsigned int nr_rxqs = map_data[2].def.max_entries;
+	unsigned int nr_rxqs = bpf_map__max_entries(rx_queue_index_map);
 	struct stats_record *rec;
 	int i;
 
-	rec = malloc(sizeof(*rec));
-	memset(rec, 0, sizeof(*rec));
+	rec = calloc(1, sizeof(struct stats_record));
 	if (!rec) {
 		fprintf(stderr, "Mem alloc error\n");
-		exit(EXIT_FAIL_MEM);
+		int_exit(FAIL_MEM_SIG);
 	}
 	rec->rxq = alloc_record_per_rxq();
 	for (i = 0; i < nr_rxqs; i++)
@@ -210,7 +250,7 @@ static struct stats_record *alloc_stats_record(void)
 
 static void free_stats_record(struct stats_record *r)
 {
-	unsigned int nr_rxqs = map_data[2].def.max_entries;
+	unsigned int nr_rxqs = bpf_map__max_entries(rx_queue_index_map);
 	int i;
 
 	for (i = 0; i < nr_rxqs; i++)
@@ -254,11 +294,11 @@ static void stats_collect(struct stats_record *rec)
 {
 	int fd, i, max_rxqs;
 
-	fd = map_data[1].fd; /* map: stats_global_map */
+	fd = bpf_map__fd(stats_global_map);
 	map_collect_percpu(fd, 0, &rec->stats);
 
-	fd = map_data[2].fd; /* map: rx_queue_index_map */
-	max_rxqs = map_data[2].def.max_entries;
+	fd = bpf_map__fd(rx_queue_index_map);
+	max_rxqs = bpf_map__max_entries(rx_queue_index_map);
 	for (i = 0; i < max_rxqs; i++)
 		map_collect_percpu(fd, i, &rec->rxq[i]);
 }
@@ -302,10 +342,10 @@ static __u64 calc_errs_pps(struct datarec *r,
 
 static void stats_print(struct stats_record *stats_rec,
 			struct stats_record *stats_prev,
-			int action)
+			int action, __u32 cfg_opt)
 {
+	unsigned int nr_rxqs = bpf_map__max_entries(rx_queue_index_map);
 	unsigned int nr_cpus = bpf_num_possible_cpus();
-	unsigned int nr_rxqs = map_data[2].def.max_entries;
 	double pps = 0, err = 0;
 	struct record *rec, *prev;
 	double t;
@@ -313,8 +353,8 @@ static void stats_print(struct stats_record *stats_rec,
 	int i;
 
 	/* Header */
-	printf("\nRunning XDP on dev:%s (ifindex:%d) action:%s\n",
-	       ifname, ifindex, action2str(action));
+	printf("\nRunning XDP on dev:%s (ifindex:%d) action:%s options:%s\n",
+	       ifname, ifindex, action2str(action), options2str(cfg_opt));
 
 	/* stats_global_map */
 	{
@@ -396,7 +436,7 @@ static inline void swap(struct stats_record **a, struct stats_record **b)
 	*b = tmp;
 }
 
-static void stats_poll(int interval, int action)
+static void stats_poll(int interval, int action, __u32 cfg_opt)
 {
 	struct stats_record *record, *prev;
 
@@ -407,7 +447,7 @@ static void stats_poll(int interval, int action)
 	while (1) {
 		swap(&prev, &record);
 		stats_collect(record);
-		stats_print(record, prev, action);
+		stats_print(record, prev, action, cfg_opt);
 		sleep(interval);
 	}
 
@@ -418,14 +458,20 @@ static void stats_poll(int interval, int action)
 
 int main(int argc, char **argv)
 {
-	struct rlimit r = {10 * 1024 * 1024, RLIM_INFINITY};
+	__u32 cfg_options= NO_TOUCH ; /* Default: Don't touch packet memory */
+	struct bpf_prog_info info = {};
+	__u32 info_len = sizeof(info);
+	int prog_fd, map_fd, opt, err;
 	bool use_separators = true;
 	struct config cfg = { 0 };
+	struct bpf_program *prog;
+	struct bpf_object *obj;
+	struct bpf_map *map;
 	char filename[256];
 	int longindex = 0;
 	int interval = 2;
 	__u32 key = 0;
-	int opt, err;
+
 
 	char action_str_buf[XDP_ACTION_MAX_STRLEN + 1 /* for \0 */] = { 0 };
 	int action = XDP_PASS; /* Default action */
@@ -433,23 +479,34 @@ int main(int argc, char **argv)
 
 	snprintf(filename, sizeof(filename), "%s_kern.o", argv[0]);
 
-	if (setrlimit(RLIMIT_MEMLOCK, &r)) {
-		perror("setrlimit(RLIMIT_MEMLOCK)");
-		return 1;
-	}
+	obj = bpf_object__open_file(filename, NULL);
+	if (libbpf_get_error(obj))
+		return EXIT_FAIL;
 
-	if (load_bpf_file(filename)) {
-		fprintf(stderr, "ERR in load_bpf_file(): %s", bpf_log_buf);
+	prog = bpf_object__next_program(obj, NULL);
+	bpf_program__set_type(prog, BPF_PROG_TYPE_XDP);
+
+	err = bpf_object__load(obj);
+	if (err)
+		return EXIT_FAIL;
+	prog_fd = bpf_program__fd(prog);
+
+	map =  bpf_object__find_map_by_name(obj, "config_map");
+	stats_global_map = bpf_object__find_map_by_name(obj, "stats_global_map");
+	rx_queue_index_map = bpf_object__find_map_by_name(obj, "rx_queue_index_map");
+	if (!map || !stats_global_map || !rx_queue_index_map) {
+		printf("finding a map in obj file failed\n");
 		return EXIT_FAIL;
 	}
+	map_fd = bpf_map__fd(map);
 
-	if (!prog_fd[0]) {
-		fprintf(stderr, "ERR: load_bpf_file: %s\n", strerror(errno));
+	if (!prog_fd) {
+		fprintf(stderr, "ERR: bpf_prog_load_xattr: %s\n", strerror(errno));
 		return EXIT_FAIL;
 	}
 
 	/* Parse commands line args */
-	while ((opt = getopt_long(argc, argv, "hSd:",
+	while ((opt = getopt_long(argc, argv, "FhSrmzd:s:a:",
 				  long_options, &longindex)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -480,6 +537,15 @@ int main(int argc, char **argv)
 			action_str = (char *)&action_str_buf;
 			strncpy(action_str, optarg, XDP_ACTION_MAX_STRLEN);
 			break;
+		case 'r':
+			cfg_options |= READ_MEM;
+			break;
+		case 'm':
+			cfg_options |= SWAP_MAC;
+			break;
+		case 'F':
+			xdp_flags &= ~XDP_FLAGS_UPDATE_IF_NOEXIST;
+			break;
 		case 'h':
 		error:
 		default:
@@ -487,6 +553,10 @@ int main(int argc, char **argv)
 			return EXIT_FAIL_OPTION;
 		}
 	}
+
+	if (!(xdp_flags & XDP_FLAGS_SKB_MODE))
+		xdp_flags |= XDP_FLAGS_DRV_MODE;
+
 	/* Required option */
 	if (ifindex == -1) {
 		fprintf(stderr, "ERR: required option --dev missing\n");
@@ -507,25 +577,38 @@ int main(int argc, char **argv)
 	}
 	cfg.action = action;
 
+	/* XDP_TX requires changing MAC-addrs, else HW may drop */
+	if (action == XDP_TX)
+		cfg_options |= SWAP_MAC;
+	cfg.options = cfg_options;
+
 	/* Trick to pretty printf with thousands separators use %' */
 	if (use_separators)
 		setlocale(LC_NUMERIC, "en_US");
 
 	/* User-side setup ifindex in config_map */
-	err = bpf_map_update_elem(map_fd[0], &key, &cfg, 0);
+	err = bpf_map_update_elem(map_fd, &key, &cfg, 0);
 	if (err) {
 		fprintf(stderr, "Store config failed (err:%d)\n", err);
 		exit(EXIT_FAIL_BPF);
 	}
 
-	/* Remove XDP program when program is interrupted */
+	/* Remove XDP program when program is interrupted or killed */
 	signal(SIGINT, int_exit);
+	signal(SIGTERM, int_exit);
 
-	if (bpf_set_link_xdp_fd(ifindex, prog_fd[0], xdp_flags) < 0) {
+	if (bpf_xdp_attach(ifindex, prog_fd, xdp_flags, NULL) < 0) {
 		fprintf(stderr, "link set xdp fd failed\n");
 		return EXIT_FAIL_XDP;
 	}
 
-	stats_poll(interval, action);
+	err = bpf_obj_get_info_by_fd(prog_fd, &info, &info_len);
+	if (err) {
+		printf("can't get prog info - %s\n", strerror(errno));
+		return err;
+	}
+	prog_id = info.id;
+
+	stats_poll(interval, action, cfg_options);
 	return EXIT_OK;
 }

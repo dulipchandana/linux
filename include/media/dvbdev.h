@@ -86,11 +86,12 @@ struct dvb_frontend;
  * @priv:		private data
  * @device:		pointer to struct device
  * @module:		pointer to struct module
- * @mfe_shared:		mfe shared: indicates mutually exclusive frontends
- *			Thie usage of this flag is currently deprecated
+ * @mfe_shared:		indicates mutually exclusive frontends.
+ *			Use of this flag is currently deprecated.
  * @mfe_dvbdev:		Frontend device in use, in the case of MFE
  * @mfe_lock:		Lock to prevent using the other frontends when MFE is
  *			used.
+ * @mdev_lock:          Protect access to the mdev pointer.
  * @mdev:		pointer to struct media_device, used when the media
  *			controller is used.
  * @conn:		RF connector. Used only if the device has no separate
@@ -114,6 +115,7 @@ struct dvb_adapter {
 	struct mutex mfe_lock;		/* access lock for thread creation */
 
 #if defined(CONFIG_MEDIA_CONTROLLER_DVB)
+	struct mutex mdev_lock;
 	struct media_device *mdev;
 	struct media_entity *conn;
 	struct media_pad *conn_pads;
@@ -291,8 +293,8 @@ static inline void dvb_register_media_controller(struct dvb_adapter *adap,
  *
  * @adap:			pointer to &struct dvb_adapter
  */
-static inline struct media_device
-*dvb_get_media_controller(struct dvb_adapter *adap)
+static inline struct media_device *
+dvb_get_media_controller(struct dvb_adapter *adap)
 {
 	return adap->mdev;
 }
@@ -319,7 +321,7 @@ int dvb_create_media_graph(struct dvb_adapter *adap,
 int dvb_generic_open(struct inode *inode, struct file *file);
 
 /**
- * dvb_generic_close - Digital TV close function, used by DVB devices
+ * dvb_generic_release - Digital TV close function, used by DVB devices
  *
  * @inode: pointer to &struct inode.
  * @file: pointer to &struct file.
@@ -358,19 +360,80 @@ long dvb_generic_ioctl(struct file *file,
 int dvb_usercopy(struct file *file, unsigned int cmd, unsigned long arg,
 		 int (*func)(struct file *file, unsigned int cmd, void *arg));
 
-/** generic DVB attach function. */
+#if IS_ENABLED(CONFIG_I2C)
+
+struct i2c_adapter;
+struct i2c_client;
+/**
+ * dvb_module_probe - helper routine to probe an I2C module
+ *
+ * @module_name:
+ *	Name of the I2C module to be probed
+ * @name:
+ *	Optional name for the I2C module. Used for debug purposes.
+ * 	If %NULL, defaults to @module_name.
+ * @adap:
+ *	pointer to &struct i2c_adapter that describes the I2C adapter where
+ *	the module will be bound.
+ * @addr:
+ *	I2C address of the adapter, in 7-bit notation.
+ * @platform_data:
+ *	Platform data to be passed to the I2C module probed.
+ *
+ * This function binds an I2C device into the DVB core. Should be used by
+ * all drivers that use I2C bus to control the hardware. A module bound
+ * with dvb_module_probe() should use dvb_module_release() to unbind.
+ *
+ * Return:
+ *	On success, return an &struct i2c_client, pointing to the bound
+ *	I2C device. %NULL otherwise.
+ *
+ * .. note::
+ *
+ *    In the past, DVB modules (mainly, frontends) were bound via dvb_attach()
+ *    macro, with does an ugly hack, using I2C low level functions. Such
+ *    usage is deprecated and will be removed soon. Instead, use this routine.
+ */
+struct i2c_client *dvb_module_probe(const char *module_name,
+				    const char *name,
+				    struct i2c_adapter *adap,
+				    unsigned char addr,
+				    void *platform_data);
+
+/**
+ * dvb_module_release - releases an I2C device allocated with
+ *	 dvb_module_probe().
+ *
+ * @client: pointer to &struct i2c_client with the I2C client to be released.
+ *	    can be %NULL.
+ *
+ * This function should be used to free all resources reserved by
+ * dvb_module_probe() and unbinding the I2C hardware.
+ */
+void dvb_module_release(struct i2c_client *client);
+
+#endif /* CONFIG_I2C */
+
+/* Legacy generic DVB attach function. */
 #ifdef CONFIG_MEDIA_ATTACH
 
 /**
  * dvb_attach - attaches a DVB frontend into the DVB core.
  *
  * @FUNCTION:	function on a frontend module to be called.
- * @ARGS...:	@FUNCTION arguments.
+ * @ARGS:	@FUNCTION arguments.
  *
  * This ancillary function loads a frontend module in runtime and runs
  * the @FUNCTION function there, with @ARGS.
  * As it increments symbol usage cont, at unregister, dvb_detach()
  * should be called.
+ *
+ * .. note::
+ *
+ *    In the past, DVB modules (mainly, frontends) were bound via dvb_attach()
+ *    macro, with does an ugly hack, using I2C low level functions. Such
+ *    usage is deprecated and will be removed soon. Instead, you should use
+ *    dvb_module_probe().
  */
 #define dvb_attach(FUNCTION, ARGS...) ({ \
 	void *__r = NULL; \
@@ -402,6 +465,6 @@ int dvb_usercopy(struct file *file, unsigned int cmd, unsigned long arg,
 
 #define dvb_detach(FUNC)	{}
 
-#endif
+#endif	/* CONFIG_MEDIA_ATTACH */
 
 #endif /* #ifndef _DVBDEV_H_ */

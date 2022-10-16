@@ -46,10 +46,10 @@ gf100_fb_oneinit(struct nvkm_fb *base)
 {
 	struct gf100_fb *fb = gf100_fb(base);
 	struct nvkm_device *device = fb->base.subdev.device;
-	int ret, size = 0x1000;
+	int ret, size = 1 << (fb->base.page ? fb->base.page : 17);
 
 	size = nvkm_longopt(device->cfgopt, "MmuDebugBufferSize", size);
-	size = min(size, 0x1000);
+	size = max(size, 0x1000);
 
 	ret = nvkm_memory_new(device, NVKM_MEM_TARGET_INST, size, 0x1000,
 			      true, &fb->base.mmu_rd);
@@ -117,13 +117,13 @@ gf100_fb_dtor(struct nvkm_fb *base)
 
 int
 gf100_fb_new_(const struct nvkm_fb_func *func, struct nvkm_device *device,
-	      int index, struct nvkm_fb **pfb)
+	      enum nvkm_subdev_type type, int inst, struct nvkm_fb **pfb)
 {
 	struct gf100_fb *fb;
 
 	if (!(fb = kzalloc(sizeof(*fb), GFP_KERNEL)))
 		return -ENOMEM;
-	nvkm_fb_ctor(func, device, index, &fb->base);
+	nvkm_fb_ctor(func, device, type, inst, &fb->base);
 	*pfb = &fb->base;
 
 	return 0;
@@ -141,7 +141,7 @@ gf100_fb = {
 };
 
 int
-gf100_fb_new(struct nvkm_device *device, int index, struct nvkm_fb **pfb)
+gf100_fb_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst, struct nvkm_fb **pfb)
 {
-	return gf100_fb_new_(&gf100_fb, device, index, pfb);
+	return gf100_fb_new_(&gf100_fb, device, type, inst, pfb);
 }

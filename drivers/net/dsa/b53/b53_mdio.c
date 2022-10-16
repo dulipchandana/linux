@@ -285,6 +285,7 @@ static const struct b53_io_ops b53_mdio_ops = {
 #define B53_BRCM_OUI_1	0x0143bc00
 #define B53_BRCM_OUI_2	0x03625c00
 #define B53_BRCM_OUI_3	0x00406000
+#define B53_BRCM_OUI_4	0x01410c00
 
 static int b53_mdio_probe(struct mdio_device *mdiodev)
 {
@@ -311,7 +312,8 @@ static int b53_mdio_probe(struct mdio_device *mdiodev)
 	 */
 	if ((phy_id & 0xfffffc00) != B53_BRCM_OUI_1 &&
 	    (phy_id & 0xfffffc00) != B53_BRCM_OUI_2 &&
-	    (phy_id & 0xfffffc00) != B53_BRCM_OUI_3) {
+	    (phy_id & 0xfffffc00) != B53_BRCM_OUI_3 &&
+	    (phy_id & 0xfffffc00) != B53_BRCM_OUI_4) {
 		dev_err(&mdiodev->dev, "Unsupported device: 0x%08x\n", phy_id);
 		return -ENODEV;
 	}
@@ -349,9 +351,23 @@ static int b53_mdio_probe(struct mdio_device *mdiodev)
 static void b53_mdio_remove(struct mdio_device *mdiodev)
 {
 	struct b53_device *dev = dev_get_drvdata(&mdiodev->dev);
-	struct dsa_switch *ds = dev->ds;
 
-	dsa_unregister_switch(ds);
+	if (!dev)
+		return;
+
+	b53_switch_remove(dev);
+}
+
+static void b53_mdio_shutdown(struct mdio_device *mdiodev)
+{
+	struct b53_device *dev = dev_get_drvdata(&mdiodev->dev);
+
+	if (!dev)
+		return;
+
+	b53_switch_shutdown(dev);
+
+	dev_set_drvdata(&mdiodev->dev, NULL);
 }
 
 static const struct of_device_id b53_of_match[] = {
@@ -360,6 +376,7 @@ static const struct of_device_id b53_of_match[] = {
 	{ .compatible = "brcm,bcm53125" },
 	{ .compatible = "brcm,bcm53128" },
 	{ .compatible = "brcm,bcm5365" },
+	{ .compatible = "brcm,bcm5389" },
 	{ .compatible = "brcm,bcm5395" },
 	{ .compatible = "brcm,bcm5397" },
 	{ .compatible = "brcm,bcm5398" },
@@ -370,6 +387,7 @@ MODULE_DEVICE_TABLE(of, b53_of_match);
 static struct mdio_driver b53_mdio_driver = {
 	.probe	= b53_mdio_probe,
 	.remove	= b53_mdio_remove,
+	.shutdown = b53_mdio_shutdown,
 	.mdiodrv.driver = {
 		.name = "bcm53xx",
 		.of_match_table = b53_of_match,

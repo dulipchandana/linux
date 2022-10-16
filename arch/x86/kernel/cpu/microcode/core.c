@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * CPU Microcode Update Driver for Linux
  *
@@ -12,23 +13,21 @@
  *		  (C) 2015 Borislav Petkov <bp@alien8.de>
  *
  * This driver allows to upgrade microcode on x86 processors.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #define pr_fmt(fmt) "microcode: " fmt
 
 #include <linux/platform_device.h>
+#include <linux/stop_machine.h>
 #include <linux/syscore_ops.h>
 #include <linux/miscdevice.h>
 #include <linux/capability.h>
 #include <linux/firmware.h>
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/cpu.h>
+#include <linux/nmi.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 
@@ -56,7 +55,7 @@ LIST_HEAD(microcode_cache);
  * All non cpu-hotplug-callback call sites use:
  *
  * - microcode_mutex to synchronize with each other;
- * - get/put_online_cpus() to synchronize with
+ * - cpus_read_lock/unlock() to synchronize with
  *   the cpu-hotplug-callback call sites.
  *
  * We guarantee that only a single cpu is being
@@ -139,25 +138,6 @@ static bool __init check_loader_disabled_bsp(void)
 		*res = false;
 
 	return *res;
-}
-
-extern struct builtin_fw __start_builtin_fw[];
-extern struct builtin_fw __end_builtin_fw[];
-
-bool get_builtin_firmware(struct cpio_data *cd, const char *name)
-{
-#ifdef CONFIG_FW_LOADER
-	struct builtin_fw *b_fw;
-
-	for (b_fw = __start_builtin_fw; b_fw != __end_builtin_fw; b_fw++) {
-		if (!strcmp(name, b_fw->name)) {
-			cd->size = b_fw->size;
-			cd->data = b_fw->data;
-			return true;
-		}
-	}
-#endif
-	return false;
 }
 
 void __init load_ucode_bsp(void)
@@ -373,147 +353,170 @@ static int collect_cpu_info(int cpu)
 	return ret;
 }
 
-struct apply_microcode_ctx {
-	int err;
-};
-
 static void apply_microcode_local(void *arg)
 {
-	struct apply_microcode_ctx *ctx = arg;
+	enum ucode_state *err = arg;
 
-	ctx->err = microcode_ops->apply_microcode(smp_processor_id());
+	*err = microcode_ops->apply_microcode(smp_processor_id());
 }
 
 static int apply_microcode_on_target(int cpu)
 {
-	struct apply_microcode_ctx ctx = { .err = 0 };
+	enum ucode_state err;
 	int ret;
 
-	ret = smp_call_function_single(cpu, apply_microcode_local, &ctx, 1);
-	if (!ret)
-		ret = ctx.err;
-
+	ret = smp_call_function_single(cpu, apply_microcode_local, &err, 1);
+	if (!ret) {
+		if (err == UCODE_ERROR)
+			ret = 1;
+	}
 	return ret;
 }
 
-#ifdef CONFIG_MICROCODE_OLD_INTERFACE
-static int do_microcode_update(const void __user *buf, size_t size)
+/* fake device for request_firmware */
+static struct platform_device	*microcode_pdev;
+
+#ifdef CONFIG_MICROCODE_LATE_LOADING
+/*
+ * Late loading dance. Why the heavy-handed stomp_machine effort?
+ *
+ * - HT siblings must be idle and not execute other code while the other sibling
+ *   is loading microcode in order to avoid any negative interactions caused by
+ *   the loading.
+ *
+ * - In addition, microcode update on the cores must be serialized until this
+ *   requirement can be relaxed in the future. Right now, this is conservative
+ *   and good.
+ */
+#define SPINUNIT 100 /* 100 nsec */
+
+static int check_online_cpus(void)
 {
-	int error = 0;
-	int cpu;
+	unsigned int cpu;
 
-	for_each_online_cpu(cpu) {
-		struct ucode_cpu_info *uci = ucode_cpu_info + cpu;
-		enum ucode_state ustate;
-
-		if (!uci->valid)
-			continue;
-
-		ustate = microcode_ops->request_microcode_user(cpu, buf, size);
-		if (ustate == UCODE_ERROR) {
-			error = -1;
-			break;
-		} else if (ustate == UCODE_OK)
-			apply_microcode_on_target(cpu);
-	}
-
-	return error;
-}
-
-static int microcode_open(struct inode *inode, struct file *file)
-{
-	return capable(CAP_SYS_RAWIO) ? nonseekable_open(inode, file) : -EPERM;
-}
-
-static ssize_t microcode_write(struct file *file, const char __user *buf,
-			       size_t len, loff_t *ppos)
-{
-	ssize_t ret = -EINVAL;
-
-	if ((len >> PAGE_SHIFT) > totalram_pages) {
-		pr_err("too much data (max %ld pages)\n", totalram_pages);
-		return ret;
-	}
-
-	get_online_cpus();
-	mutex_lock(&microcode_mutex);
-
-	if (do_microcode_update(buf, len) == 0)
-		ret = (ssize_t)len;
-
-	if (ret > 0)
-		perf_check_microcode();
-
-	mutex_unlock(&microcode_mutex);
-	put_online_cpus();
-
-	return ret;
-}
-
-static const struct file_operations microcode_fops = {
-	.owner			= THIS_MODULE,
-	.write			= microcode_write,
-	.open			= microcode_open,
-	.llseek		= no_llseek,
-};
-
-static struct miscdevice microcode_dev = {
-	.minor			= MICROCODE_MINOR,
-	.name			= "microcode",
-	.nodename		= "cpu/microcode",
-	.fops			= &microcode_fops,
-};
-
-static int __init microcode_dev_init(void)
-{
-	int error;
-
-	error = misc_register(&microcode_dev);
-	if (error) {
-		pr_err("can't misc_register on minor=%d\n", MICROCODE_MINOR);
-		return error;
+	/*
+	 * Make sure all CPUs are online.  It's fine for SMT to be disabled if
+	 * all the primary threads are still online.
+	 */
+	for_each_present_cpu(cpu) {
+		if (topology_is_primary_thread(cpu) && !cpu_online(cpu)) {
+			pr_err("Not all CPUs online, aborting microcode update.\n");
+			return -EINVAL;
+		}
 	}
 
 	return 0;
 }
 
-static void __exit microcode_dev_exit(void)
+static atomic_t late_cpus_in;
+static atomic_t late_cpus_out;
+
+static int __wait_for_cpus(atomic_t *t, long long timeout)
 {
-	misc_deregister(&microcode_dev);
+	int all_cpus = num_online_cpus();
+
+	atomic_inc(t);
+
+	while (atomic_read(t) < all_cpus) {
+		if (timeout < SPINUNIT) {
+			pr_err("Timeout while waiting for CPUs rendezvous, remaining: %d\n",
+				all_cpus - atomic_read(t));
+			return 1;
+		}
+
+		ndelay(SPINUNIT);
+		timeout -= SPINUNIT;
+
+		touch_nmi_watchdog();
+	}
+	return 0;
 }
-#else
-#define microcode_dev_init()	0
-#define microcode_dev_exit()	do { } while (0)
-#endif
 
-/* fake device for request_firmware */
-static struct platform_device	*microcode_pdev;
-
-static int reload_for_cpu(int cpu)
+/*
+ * Returns:
+ * < 0 - on error
+ *   0 - success (no update done or microcode was updated)
+ */
+static int __reload_late(void *info)
 {
-	struct ucode_cpu_info *uci = ucode_cpu_info + cpu;
-	enum ucode_state ustate;
-	int err = 0;
+	int cpu = smp_processor_id();
+	enum ucode_state err;
+	int ret = 0;
 
-	if (!uci->valid)
-		return err;
+	/*
+	 * Wait for all CPUs to arrive. A load will not be attempted unless all
+	 * CPUs show up.
+	 * */
+	if (__wait_for_cpus(&late_cpus_in, NSEC_PER_SEC))
+		return -1;
 
-	ustate = microcode_ops->request_microcode_fw(cpu, &microcode_pdev->dev, true);
-	if (ustate == UCODE_OK)
-		apply_microcode_on_target(cpu);
+	/*
+	 * On an SMT system, it suffices to load the microcode on one sibling of
+	 * the core because the microcode engine is shared between the threads.
+	 * Synchronization still needs to take place so that no concurrent
+	 * loading attempts happen on multiple threads of an SMT core. See
+	 * below.
+	 */
+	if (cpumask_first(topology_sibling_cpumask(cpu)) == cpu)
+		apply_microcode_local(&err);
 	else
-		if (ustate == UCODE_ERROR)
-			err = -EINVAL;
-	return err;
+		goto wait_for_siblings;
+
+	if (err >= UCODE_NFOUND) {
+		if (err == UCODE_ERROR)
+			pr_warn("Error reloading microcode on CPU %d\n", cpu);
+
+		ret = -1;
+	}
+
+wait_for_siblings:
+	if (__wait_for_cpus(&late_cpus_out, NSEC_PER_SEC))
+		panic("Timeout during microcode update!\n");
+
+	/*
+	 * At least one thread has completed update on each core.
+	 * For others, simply call the update to make sure the
+	 * per-cpu cpuinfo can be updated with right microcode
+	 * revision.
+	 */
+	if (cpumask_first(topology_sibling_cpumask(cpu)) != cpu)
+		apply_microcode_local(&err);
+
+	return ret;
+}
+
+/*
+ * Reload microcode late on all CPUs. Wait for a sec until they
+ * all gather together.
+ */
+static int microcode_reload_late(void)
+{
+	int old = boot_cpu_data.microcode, ret;
+
+	pr_err("Attempting late microcode loading - it is dangerous and taints the kernel.\n");
+	pr_err("You should switch to early loading, if possible.\n");
+
+	atomic_set(&late_cpus_in,  0);
+	atomic_set(&late_cpus_out, 0);
+
+	ret = stop_machine_cpuslocked(__reload_late, NULL, cpu_online_mask);
+	if (ret == 0)
+		microcode_check();
+
+	pr_info("Reload completed, microcode revision: 0x%x -> 0x%x\n",
+		old, boot_cpu_data.microcode);
+
+	return ret;
 }
 
 static ssize_t reload_store(struct device *dev,
 			    struct device_attribute *attr,
 			    const char *buf, size_t size)
 {
+	enum ucode_state tmp_ret = UCODE_OK;
+	int bsp = boot_cpu_data.cpu_index;
 	unsigned long val;
-	int cpu;
-	ssize_t ret = 0, tmp_ret;
+	ssize_t ret = 0;
 
 	ret = kstrtoul(buf, 0, &val);
 	if (ret)
@@ -522,27 +525,33 @@ static ssize_t reload_store(struct device *dev,
 	if (val != 1)
 		return size;
 
-	get_online_cpus();
+	cpus_read_lock();
+
+	ret = check_online_cpus();
+	if (ret)
+		goto put;
+
+	tmp_ret = microcode_ops->request_microcode_fw(bsp, &microcode_pdev->dev, true);
+	if (tmp_ret != UCODE_NEW)
+		goto put;
+
 	mutex_lock(&microcode_mutex);
-	for_each_online_cpu(cpu) {
-		tmp_ret = reload_for_cpu(cpu);
-		if (tmp_ret != 0)
-			pr_warn("Error reloading microcode on CPU %d\n", cpu);
-
-		/* save retval of the first encountered reload error */
-		if (!ret)
-			ret = tmp_ret;
-	}
-	if (!ret)
-		perf_check_microcode();
+	ret = microcode_reload_late();
 	mutex_unlock(&microcode_mutex);
-	put_online_cpus();
 
-	if (!ret)
+put:
+	cpus_read_unlock();
+
+	if (ret == 0)
 		ret = size;
+
+	add_taint(TAINT_CPU_OUT_OF_SPEC, LOCKDEP_STILL_OK);
 
 	return ret;
 }
+
+static DEVICE_ATTR_WO(reload);
+#endif
 
 static ssize_t version_show(struct device *dev,
 			struct device_attribute *attr, char *buf)
@@ -560,9 +569,8 @@ static ssize_t pf_show(struct device *dev,
 	return sprintf(buf, "0x%x\n", uci->cpu_sig.pf);
 }
 
-static DEVICE_ATTR_WO(reload);
-static DEVICE_ATTR(version, 0400, version_show, NULL);
-static DEVICE_ATTR(processor_flags, 0400, pf_show, NULL);
+static DEVICE_ATTR(version, 0444, version_show, NULL);
+static DEVICE_ATTR(processor_flags, 0444, pf_show, NULL);
 
 static struct attribute *mc_default_attrs[] = {
 	&dev_attr_version.attr,
@@ -606,10 +614,8 @@ static enum ucode_state microcode_init_cpu(int cpu, bool refresh_fw)
 	if (system_state != SYSTEM_RUNNING)
 		return UCODE_NFOUND;
 
-	ustate = microcode_ops->request_microcode_fw(cpu, &microcode_pdev->dev,
-						     refresh_fw);
-
-	if (ustate == UCODE_OK) {
+	ustate = microcode_ops->request_microcode_fw(cpu, &microcode_pdev->dev, refresh_fw);
+	if (ustate == UCODE_NEW) {
 		pr_debug("CPU%d updated upon init\n", cpu);
 		apply_microcode_on_target(cpu);
 	}
@@ -669,9 +675,9 @@ static struct subsys_interface mc_cpu_interface = {
 };
 
 /**
- * mc_bp_resume - Update boot CPU microcode during resume.
+ * microcode_bsp_resume - Update boot CPU microcode during resume.
  */
-static void mc_bp_resume(void)
+void microcode_bsp_resume(void)
 {
 	int cpu = smp_processor_id();
 	struct ucode_cpu_info *uci = ucode_cpu_info + cpu;
@@ -683,16 +689,19 @@ static void mc_bp_resume(void)
 }
 
 static struct syscore_ops mc_syscore_ops = {
-	.resume			= mc_bp_resume,
+	.resume			= microcode_bsp_resume,
 };
+
+static int mc_cpu_starting(unsigned int cpu)
+{
+	microcode_update_cpu(cpu);
+	pr_debug("CPU%d added\n", cpu);
+	return 0;
+}
 
 static int mc_cpu_online(unsigned int cpu)
 {
-	struct device *dev;
-
-	dev = get_cpu_device(cpu);
-	microcode_update_cpu(cpu);
-	pr_debug("CPU%d added\n", cpu);
+	struct device *dev = get_cpu_device(cpu);
 
 	if (sysfs_create_group(&dev->kobj, &mc_attr_group))
 		pr_err("Failed to create group for CPU%d\n", cpu);
@@ -712,7 +721,9 @@ static int mc_cpu_down_prep(unsigned int cpu)
 }
 
 static struct attribute *cpu_root_microcode_attrs[] = {
+#ifdef CONFIG_MICROCODE_LATE_LOADING
 	&dev_attr_reload.attr,
+#endif
 	NULL
 };
 
@@ -721,7 +732,7 @@ static const struct attribute_group cpu_root_microcode_group = {
 	.attrs = cpu_root_microcode_attrs,
 };
 
-int __init microcode_init(void)
+static int __init microcode_init(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 	int error;
@@ -744,14 +755,11 @@ int __init microcode_init(void)
 	if (IS_ERR(microcode_pdev))
 		return PTR_ERR(microcode_pdev);
 
-	get_online_cpus();
+	cpus_read_lock();
 	mutex_lock(&microcode_mutex);
-
 	error = subsys_interface_register(&mc_cpu_interface);
-	if (!error)
-		perf_check_microcode();
 	mutex_unlock(&microcode_mutex);
-	put_online_cpus();
+	cpus_read_unlock();
 
 	if (error)
 		goto out_pdev;
@@ -764,11 +772,9 @@ int __init microcode_init(void)
 		goto out_driver;
 	}
 
-	error = microcode_dev_init();
-	if (error)
-		goto out_ucode_group;
-
 	register_syscore_ops(&mc_syscore_ops);
+	cpuhp_setup_state_nocalls(CPUHP_AP_MICROCODE_LOADER, "x86/microcode:starting",
+				  mc_cpu_starting, NULL);
 	cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN, "x86/microcode:online",
 				  mc_cpu_online, mc_cpu_down_prep);
 
@@ -776,18 +782,14 @@ int __init microcode_init(void)
 
 	return 0;
 
- out_ucode_group:
-	sysfs_remove_group(&cpu_subsys.dev_root->kobj,
-			   &cpu_root_microcode_group);
-
  out_driver:
-	get_online_cpus();
+	cpus_read_lock();
 	mutex_lock(&microcode_mutex);
 
 	subsys_interface_unregister(&mc_cpu_interface);
 
 	mutex_unlock(&microcode_mutex);
-	put_online_cpus();
+	cpus_read_unlock();
 
  out_pdev:
 	platform_device_unregister(microcode_pdev);

@@ -1,12 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014 Google, Inc.
- *
- * Licensed under the terms of the GNU GPL License version 2
  *
  * Selftests for execveat(2).
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE  /* to get O_PATH, AT_EMPTY_PATH */
+#endif
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -19,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "../kselftest.h"
 
 static char longpath[2 * PATH_MAX] = "";
 static char *envp[] = { "IN_TEST=yes", NULL, NULL };
@@ -249,8 +252,8 @@ static int run_tests(void)
 	errno = 0;
 	execveat_(-1, NULL, NULL, NULL, 0);
 	if (errno == ENOSYS) {
-		printf("[FAIL] ENOSYS calling execveat - no kernel support?\n");
-		return 1;
+		ksft_exit_skip(
+			"ENOSYS calling execveat - no kernel support?\n");
 	}
 
 	/* Change file position to confirm it doesn't affect anything */
@@ -309,6 +312,10 @@ static int run_tests(void)
 	/*   absolute path */
 	fail += check_execveat_fail(AT_FDCWD, fullname_symlink,
 				    AT_SYMLINK_NOFOLLOW, ELOOP);
+
+	/*  Non-regular file failure */
+	fail += check_execveat_fail(dot_dfd, "pipe", 0, EACCES);
+	unlink("pipe");
 
 	/* Shell script wrapping executable file: */
 	/*   dfd + path */
@@ -383,6 +390,8 @@ static void prerequisites(void)
 	fd = open("subdir.ephemeral/script", O_RDWR|O_CREAT|O_TRUNC, 0755);
 	write(fd, script, strlen(script));
 	close(fd);
+
+	mkfifo("pipe", 0755);
 }
 
 int main(int argc, char **argv)

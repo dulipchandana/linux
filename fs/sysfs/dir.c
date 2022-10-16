@@ -6,7 +6,7 @@
  * Copyright (c) 2007 SUSE Linux Products GmbH
  * Copyright (c) 2007 Tejun Heo <teheo@suse.de>
  *
- * Please see Documentation/filesystems/sysfs.txt for more information.
+ * Please see Documentation/filesystems/sysfs.rst for more information.
  */
 
 #define pr_fmt(fmt)	"sysfs: " fmt
@@ -40,8 +40,11 @@ void sysfs_warn_dup(struct kernfs_node *parent, const char *name)
 int sysfs_create_dir_ns(struct kobject *kobj, const void *ns)
 {
 	struct kernfs_node *parent, *kn;
+	kuid_t uid;
+	kgid_t gid;
 
-	BUG_ON(!kobj);
+	if (WARN_ON(!kobj))
+		return -EINVAL;
 
 	if (kobj->parent)
 		parent = kobj->parent->sd;
@@ -51,8 +54,10 @@ int sysfs_create_dir_ns(struct kobject *kobj, const void *ns)
 	if (!parent)
 		return -ENOENT;
 
-	kn = kernfs_create_dir_ns(parent, kobject_name(kobj),
-				  S_IRWXU | S_IRUGO | S_IXUGO, kobj, ns);
+	kobject_get_ownership(kobj, &uid, &gid);
+
+	kn = kernfs_create_dir_ns(parent, kobject_name(kobj), 0755, uid, gid,
+				  kobj, ns);
 	if (IS_ERR(kn)) {
 		if (PTR_ERR(kn) == -EEXIST)
 			sysfs_warn_dup(parent, kobject_name(kobj));

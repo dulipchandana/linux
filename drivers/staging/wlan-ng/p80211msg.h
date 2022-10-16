@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1)
-/* p80211msg.h
+/* SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1) */
+/*
  *
  * Macros, constants, types, and funcs for req and ind messages
  *

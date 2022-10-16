@@ -201,14 +201,16 @@ affs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 	struct super_block *sb = dir->i_sb;
 	struct buffer_head *bh;
 	struct inode *inode = NULL;
+	struct dentry *res;
 
 	pr_debug("%s(\"%pd\")\n", __func__, dentry);
 
 	affs_lock_dir(dir);
 	bh = affs_find_entry(dir, dentry);
-	affs_unlock_dir(dir);
-	if (IS_ERR(bh))
+	if (IS_ERR(bh)) {
+		affs_unlock_dir(dir);
 		return ERR_CAST(bh);
+	}
 	if (bh) {
 		u32 ino = bh->b_blocknr;
 
@@ -222,11 +224,12 @@ affs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 		}
 		affs_brelse(bh);
 		inode = affs_iget(sb, ino);
-		if (IS_ERR(inode))
-			return ERR_CAST(inode);
 	}
-	d_add(dentry, inode);
-	return NULL;
+	res = d_splice_alias(inode, dentry);
+	if (!IS_ERR_OR_NULL(res))
+		res->d_fsdata = dentry->d_fsdata;
+	affs_unlock_dir(dir);
+	return res;
 }
 
 int
@@ -239,7 +242,8 @@ affs_unlink(struct inode *dir, struct dentry *dentry)
 }
 
 int
-affs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
+affs_create(struct user_namespace *mnt_userns, struct inode *dir,
+	    struct dentry *dentry, umode_t mode, bool excl)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode	*inode;
@@ -270,7 +274,8 @@ affs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
 }
 
 int
-affs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+affs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
+	   struct dentry *dentry, umode_t mode)
 {
 	struct inode		*inode;
 	int			 error;
@@ -308,7 +313,8 @@ affs_rmdir(struct inode *dir, struct dentry *dentry)
 }
 
 int
-affs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
+affs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
+	     struct dentry *dentry, const char *symname)
 {
 	struct super_block	*sb = dir->i_sb;
 	struct buffer_head	*bh;
@@ -457,8 +463,10 @@ affs_xrename(struct inode *old_dir, struct dentry *old_dentry,
 		return -EIO;
 
 	bh_new = affs_bread(sb, d_inode(new_dentry)->i_ino);
-	if (!bh_new)
+	if (!bh_new) {
+		affs_brelse(bh_old);
 		return -EIO;
+	}
 
 	/* Remove old header from its parent directory. */
 	affs_lock_dir(old_dir);
@@ -495,9 +503,9 @@ done:
 	return retval;
 }
 
-int affs_rename2(struct inode *old_dir, struct dentry *old_dentry,
-			struct inode *new_dir, struct dentry *new_dentry,
-			unsigned int flags)
+int affs_rename2(struct user_namespace *mnt_userns, struct inode *old_dir,
+		 struct dentry *old_dentry, struct inode *new_dir,
+		 struct dentry *new_dentry, unsigned int flags)
 {
 
 	if (flags & ~(RENAME_NOREPLACE | RENAME_EXCHANGE))

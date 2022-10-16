@@ -1,17 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kernel Connection Multiplexor
  *
  * Copyright (c) 2016 Tom Herbert <tom@herbertland.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
  */
 
 #include <linux/bpf.h>
 #include <linux/errno.h>
 #include <linux/errqueue.h>
 #include <linux/file.h>
+#include <linux/filter.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -50,7 +48,7 @@ static inline struct kcm_tx_msg *kcm_tx_msg(struct sk_buff *skb)
 static void report_csk_error(struct sock *csk, int err)
 {
 	csk->sk_err = EPIPE;
-	csk->sk_error_report(csk);
+	sk_error_report(csk);
 }
 
 static void kcm_abort_tx_psock(struct kcm_psock *psock, int err,
@@ -381,8 +379,10 @@ static int kcm_parse_func_strparser(struct strparser *strp, struct sk_buff *skb)
 {
 	struct kcm_psock *psock = container_of(strp, struct kcm_psock, strp);
 	struct bpf_prog *prog = psock->bpf_prog;
+	int res;
 
-	return (*prog->bpf_func)(skb, prog->insnsi);
+	res = bpf_prog_run_pin_on_cpu(prog, skb);
+	return res;
 }
 
 static int kcm_read_sock_done(struct strparser *strp, int err)
@@ -638,15 +638,15 @@ do_frag_list:
 			frag_offset = 0;
 do_frag:
 			frag = &skb_shinfo(skb)->frags[fragidx];
-			if (WARN_ON(!frag->size)) {
+			if (WARN_ON(!skb_frag_size(frag))) {
 				ret = -EINVAL;
 				goto out;
 			}
 
 			ret = kernel_sendpage(psock->sk->sk_socket,
-					      frag->page.p,
-					      frag->page_offset + frag_offset,
-					      frag->size - frag_offset,
+					      skb_frag_page(frag),
+					      skb_frag_off(frag) + frag_offset,
+					      skb_frag_size(frag) - frag_offset,
 					      MSG_DONTWAIT);
 			if (ret <= 0) {
 				if (ret == -EAGAIN) {
@@ -664,7 +664,7 @@ do_frag:
 
 				/* Hard failure in sending message, abort this
 				 * psock since it has lost framing
-				 * synchonization and retry sending the
+				 * synchronization and retry sending the
 				 * message from the beginning.
 				 */
 				kcm_abort_tx_psock(psock, ret ? -ret : EPIPE,
@@ -681,7 +681,7 @@ do_frag:
 			sent += ret;
 			frag_offset += ret;
 			KCM_STATS_ADD(psock->stats.tx_bytes, ret);
-			if (frag_offset < frag->size) {
+			if (frag_offset < skb_frag_size(frag)) {
 				/* Not finished with this frag */
 				goto do_frag;
 			}
@@ -787,7 +787,7 @@ static ssize_t kcm_sendpage(struct socket *sock, struct page *page,
 
 		if (skb_can_coalesce(skb, i, page, offset)) {
 			skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], size);
-			skb_shinfo(skb)->tx_flags |= SKBTX_SHARED_FRAG;
+			skb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;
 			goto coalesced;
 		}
 
@@ -835,7 +835,7 @@ static ssize_t kcm_sendpage(struct socket *sock, struct page *page,
 
 	get_page(page);
 	skb_fill_page_desc(skb, i, page, offset, size);
-	skb_shinfo(skb)->tx_flags |= SKBTX_SHARED_FRAG;
+	skb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;
 
 coalesced:
 	skb->len += size;
@@ -1266,7 +1266,7 @@ static void kcm_recv_enable(struct kcm_sock *kcm)
 }
 
 static int kcm_setsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, unsigned int optlen)
+			  sockptr_t optval, unsigned int optlen)
 {
 	struct kcm_sock *kcm = kcm_sk(sock->sk);
 	int val, valbool;
@@ -1278,8 +1278,8 @@ static int kcm_setsockopt(struct socket *sock, int level, int optname,
 	if (optlen < sizeof(int))
 		return -EINVAL;
 
-	if (get_user(val, (int __user *)optval))
-		return -EINVAL;
+	if (copy_from_sockptr(&val, optval, sizeof(int)))
+		return -EFAULT;
 
 	valbool = val ? 1 : 0;
 
@@ -1381,45 +1381,54 @@ static int kcm_attach(struct socket *sock, struct socket *csock,
 		.parse_msg = kcm_parse_func_strparser,
 		.read_sock_done = kcm_read_sock_done,
 	};
-	int err;
+	int err = 0;
 
 	csk = csock->sk;
 	if (!csk)
 		return -EINVAL;
 
+	lock_sock(csk);
+
 	/* Only allow TCP sockets to be attached for now */
 	if ((csk->sk_family != AF_INET && csk->sk_family != AF_INET6) ||
-	    csk->sk_protocol != IPPROTO_TCP)
-		return -EOPNOTSUPP;
+	    csk->sk_protocol != IPPROTO_TCP) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
 
 	/* Don't allow listeners or closed sockets */
-	if (csk->sk_state == TCP_LISTEN || csk->sk_state == TCP_CLOSE)
-		return -EOPNOTSUPP;
+	if (csk->sk_state == TCP_LISTEN || csk->sk_state == TCP_CLOSE) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
 
 	psock = kmem_cache_zalloc(kcm_psockp, GFP_KERNEL);
-	if (!psock)
-		return -ENOMEM;
+	if (!psock) {
+		err = -ENOMEM;
+		goto out;
+	}
 
 	psock->mux = mux;
 	psock->sk = csk;
 	psock->bpf_prog = prog;
 
-	err = strp_init(&psock->strp, csk, &cb);
-	if (err) {
-		kmem_cache_free(kcm_psockp, psock);
-		return err;
-	}
-
 	write_lock_bh(&csk->sk_callback_lock);
 
-	/* Check if sk_user_data is aready by KCM or someone else.
+	/* Check if sk_user_data is already by KCM or someone else.
 	 * Must be done under lock to prevent race conditions.
 	 */
 	if (csk->sk_user_data) {
 		write_unlock_bh(&csk->sk_callback_lock);
-		strp_done(&psock->strp);
 		kmem_cache_free(kcm_psockp, psock);
-		return -EALREADY;
+		err = -EALREADY;
+		goto out;
+	}
+
+	err = strp_init(&psock->strp, csk, &cb);
+	if (err) {
+		write_unlock_bh(&csk->sk_callback_lock);
+		kmem_cache_free(kcm_psockp, psock);
+		goto out;
 	}
 
 	psock->save_data_ready = csk->sk_data_ready;
@@ -1455,7 +1464,10 @@ static int kcm_attach(struct socket *sock, struct socket *csock,
 	/* Schedule RX work in case there are already bytes queued */
 	strp_check_rcv(&psock->strp);
 
-	return 0;
+out:
+	release_sock(csk);
+
+	return err;
 }
 
 static int kcm_attach_ioctl(struct socket *sock, struct kcm_attach *info)
@@ -1484,7 +1496,7 @@ static int kcm_attach_ioctl(struct socket *sock, struct kcm_attach *info)
 
 	return 0;
 out:
-	fput(csock->file);
+	sockfd_put(csock);
 	return err;
 }
 
@@ -1507,6 +1519,7 @@ static void kcm_unattach(struct kcm_psock *psock)
 
 	if (WARN_ON(psock->rx_kcm)) {
 		write_unlock_bh(&csk->sk_callback_lock);
+		release_sock(csk);
 		return;
 	}
 
@@ -1631,7 +1644,7 @@ static int kcm_unattach_ioctl(struct socket *sock, struct kcm_unattach *info)
 	spin_unlock_bh(&mux->lock);
 
 out:
-	fput(csock->file);
+	sockfd_put(csock);
 	return err;
 }
 
@@ -1657,7 +1670,7 @@ static struct file *kcm_clone(struct socket *osock)
 	__module_get(newsock->ops->owner);
 
 	newsk = sk_alloc(sock_net(osock->sk), PF_KCM, GFP_KERNEL,
-			 &kcm_proto, true);
+			 &kcm_proto, false);
 	if (!newsk) {
 		sock_release(newsock);
 		return ERR_PTR(-ENOMEM);
@@ -1825,10 +1838,10 @@ static int kcm_release(struct socket *sock)
 	kcm = kcm_sk(sk);
 	mux = kcm->mux;
 
+	lock_sock(sk);
 	sock_orphan(sk);
 	kfree_skb(kcm->seq_skb);
 
-	lock_sock(sk);
 	/* Purge queue under lock to avoid race condition with tx_work trying
 	 * to act when queue is nonempty. If tx_work runs after this point
 	 * it will just return.
@@ -2022,13 +2035,13 @@ static int __init kcm_init(void)
 
 	kcm_muxp = kmem_cache_create("kcm_mux_cache",
 				     sizeof(struct kcm_mux), 0,
-				     SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+				     SLAB_HWCACHE_ALIGN, NULL);
 	if (!kcm_muxp)
 		goto fail;
 
 	kcm_psockp = kmem_cache_create("kcm_psock_cache",
 				       sizeof(struct kcm_psock), 0,
-					SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+					SLAB_HWCACHE_ALIGN, NULL);
 	if (!kcm_psockp)
 		goto fail;
 
@@ -2040,13 +2053,13 @@ static int __init kcm_init(void)
 	if (err)
 		goto fail;
 
-	err = sock_register(&kcm_family_ops);
-	if (err)
-		goto sock_register_fail;
-
 	err = register_pernet_device(&kcm_net_ops);
 	if (err)
 		goto net_ops_fail;
+
+	err = sock_register(&kcm_family_ops);
+	if (err)
+		goto sock_register_fail;
 
 	err = kcm_proc_init();
 	if (err)
@@ -2055,12 +2068,12 @@ static int __init kcm_init(void)
 	return 0;
 
 proc_init_fail:
-	unregister_pernet_device(&kcm_net_ops);
-
-net_ops_fail:
 	sock_unregister(PF_KCM);
 
 sock_register_fail:
+	unregister_pernet_device(&kcm_net_ops);
+
+net_ops_fail:
 	proto_unregister(&kcm_proto);
 
 fail:
@@ -2076,8 +2089,8 @@ fail:
 static void __exit kcm_exit(void)
 {
 	kcm_proc_exit();
-	unregister_pernet_device(&kcm_net_ops);
 	sock_unregister(PF_KCM);
+	unregister_pernet_device(&kcm_net_ops);
 	proto_unregister(&kcm_proto);
 	destroy_workqueue(kcm_wq);
 
@@ -2090,4 +2103,3 @@ module_exit(kcm_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_NETPROTO(PF_KCM);
-

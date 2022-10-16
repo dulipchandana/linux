@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * binfmt_misc.c
  *
  * Copyright (C) 1997 Richard Günther
  *
  * binfmt_misc detects binaries via a magic or filename extension and invokes
- * a specified wrapper. See Documentation/binfmt_misc.txt for more details.
+ * a specified wrapper. See Documentation/admin-guide/binfmt-misc.rst for more details.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -22,6 +23,7 @@
 #include <linux/pagemap.h>
 #include <linux/namei.h>
 #include <linux/mount.h>
+#include <linux/fs_context.h>
 #include <linux/syscalls.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
@@ -132,7 +134,6 @@ static int load_misc_binary(struct linux_binprm *bprm)
 	Node *fmt;
 	struct file *interp_file = NULL;
 	int retval;
-	int fd_binary = -1;
 
 	retval = -ENOEXEC;
 	if (!enabled)
@@ -152,60 +153,36 @@ static int load_misc_binary(struct linux_binprm *bprm)
 	if (bprm->interp_flags & BINPRM_FLAGS_PATH_INACCESSIBLE)
 		goto ret;
 
-	if (!(fmt->flags & MISC_FMT_PRESERVE_ARGV0)) {
+	if (fmt->flags & MISC_FMT_PRESERVE_ARGV0) {
+		bprm->interp_flags |= BINPRM_FLAGS_PRESERVE_ARGV0;
+	} else {
 		retval = remove_arg_zero(bprm);
 		if (retval)
 			goto ret;
 	}
 
-	if (fmt->flags & MISC_FMT_OPEN_BINARY) {
+	if (fmt->flags & MISC_FMT_OPEN_BINARY)
+		bprm->have_execfd = 1;
 
-		/* if the binary should be opened on behalf of the
-		 * interpreter than keep it open and assign descriptor
-		 * to it
-		 */
-		fd_binary = get_unused_fd_flags(0);
-		if (fd_binary < 0) {
-			retval = fd_binary;
-			goto ret;
-		}
-		fd_install(fd_binary, bprm->file);
-
-		/* if the binary is not readable than enforce mm->dumpable=0
-		   regardless of the interpreter's permissions */
-		would_dump(bprm, bprm->file);
-
-		allow_write_access(bprm->file);
-		bprm->file = NULL;
-
-		/* mark the bprm that fd should be passed to interp */
-		bprm->interp_flags |= BINPRM_FLAGS_EXECFD;
-		bprm->interp_data = fd_binary;
-
-	} else {
-		allow_write_access(bprm->file);
-		fput(bprm->file);
-		bprm->file = NULL;
-	}
 	/* make argv[1] be the path to the binary */
-	retval = copy_strings_kernel(1, &bprm->interp, bprm);
+	retval = copy_string_kernel(bprm->interp, bprm);
 	if (retval < 0)
-		goto error;
+		goto ret;
 	bprm->argc++;
 
 	/* add the interp as argv[0] */
-	retval = copy_strings_kernel(1, &fmt->interpreter, bprm);
+	retval = copy_string_kernel(fmt->interpreter, bprm);
 	if (retval < 0)
-		goto error;
+		goto ret;
 	bprm->argc++;
 
 	/* Update interp in case binfmt_script needs it. */
 	retval = bprm_change_interp(fmt->interpreter, bprm);
 	if (retval < 0)
-		goto error;
+		goto ret;
 
 	if (fmt->flags & MISC_FMT_OPEN_FILE) {
-		interp_file = filp_clone_open(fmt->interp_file);
+		interp_file = file_clone_open(fmt->interp_file);
 		if (!IS_ERR(interp_file))
 			deny_write_access(interp_file);
 	} else {
@@ -213,38 +190,16 @@ static int load_misc_binary(struct linux_binprm *bprm)
 	}
 	retval = PTR_ERR(interp_file);
 	if (IS_ERR(interp_file))
-		goto error;
+		goto ret;
 
-	bprm->file = interp_file;
-	if (fmt->flags & MISC_FMT_CREDENTIALS) {
-		loff_t pos = 0;
+	bprm->interpreter = interp_file;
+	if (fmt->flags & MISC_FMT_CREDENTIALS)
+		bprm->execfd_creds = 1;
 
-		/*
-		 * No need to call prepare_binprm(), it's already been
-		 * done.  bprm->buf is stale, update from interp_file.
-		 */
-		memset(bprm->buf, 0, BINPRM_BUF_SIZE);
-		retval = kernel_read(bprm->file, bprm->buf, BINPRM_BUF_SIZE,
-				&pos);
-	} else
-		retval = prepare_binprm(bprm);
-
-	if (retval < 0)
-		goto error;
-
-	retval = search_binary_handler(bprm);
-	if (retval < 0)
-		goto error;
-
+	retval = 0;
 ret:
 	dput(fmt->dentry);
 	return retval;
-error:
-	if (fd_binary > 0)
-		sys_close(fd_binary);
-	bprm->interp_flags = 0;
-	bprm->interp_data = 0;
-	goto ret;
 }
 
 /* Command parsers */
@@ -387,8 +342,13 @@ static Node *create_entry(const char __user *buffer, size_t count)
 		s = strchr(p, del);
 		if (!s)
 			goto einval;
-		*s++ = '\0';
-		e->offset = simple_strtoul(p, &p, 10);
+		*s = '\0';
+		if (p != s) {
+			int r = kstrtoint(p, 10, &e->offset);
+			if (r != 0 || e->offset < 0)
+				goto einval;
+		}
+		p = s;
 		if (*p++)
 			goto einval;
 		pr_debug("register: offset: %#x\n", e->offset);
@@ -428,7 +388,8 @@ static Node *create_entry(const char __user *buffer, size_t count)
 		if (e->mask &&
 		    string_unescape_inplace(e->mask, UNESCAPE_HEX) != e->size)
 			goto einval;
-		if (e->size + e->offset > BINPRM_BUF_SIZE)
+		if (e->size > BINPRM_BUF_SIZE ||
+		    BINPRM_BUF_SIZE - e->size < e->offset)
 			goto einval;
 		pr_debug("register: magic/mask length: %i\n", e->size);
 		if (USE_DEBUG) {
@@ -688,11 +649,23 @@ static ssize_t bm_register_write(struct file *file, const char __user *buffer,
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct dentry *root = sb->s_root, *dentry;
 	int err = 0;
+	struct file *f = NULL;
 
 	e = create_entry(buffer, count);
 
 	if (IS_ERR(e))
 		return PTR_ERR(e);
+
+	if (e->flags & MISC_FMT_OPEN_FILE) {
+		f = open_exec(e->interpreter);
+		if (IS_ERR(f)) {
+			pr_notice("register: failed to install interpreter file %s\n",
+				 e->interpreter);
+			kfree(e);
+			return PTR_ERR(f);
+		}
+		e->interp_file = f;
+	}
 
 	inode_lock(d_inode(root));
 	dentry = lookup_one_len(e->name, root, strlen(e->name));
@@ -717,21 +690,6 @@ static ssize_t bm_register_write(struct file *file, const char __user *buffer,
 		goto out2;
 	}
 
-	if (e->flags & MISC_FMT_OPEN_FILE) {
-		struct file *f;
-
-		f = open_exec(e->interpreter);
-		if (IS_ERR(f)) {
-			err = PTR_ERR(f);
-			pr_notice("register: failed to install interpreter file %s\n", e->interpreter);
-			simple_release_fs(&bm_mnt, &entry_count);
-			iput(inode);
-			inode = NULL;
-			goto out2;
-		}
-		e->interp_file = f;
-	}
-
 	e->dentry = dget(dentry);
 	inode->i_private = e;
 	inode->i_fop = &bm_entry_operations;
@@ -748,6 +706,8 @@ out:
 	inode_unlock(d_inode(root));
 
 	if (err) {
+		if (f)
+			filp_close(f, NULL);
 		kfree(e);
 		return err;
 	}
@@ -814,7 +774,7 @@ static const struct super_operations s_ops = {
 	.evict_inode	= bm_evict_inode,
 };
 
-static int bm_fill_super(struct super_block *sb, void *data, int silent)
+static int bm_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	int err;
 	static const struct tree_descr bm_files[] = {
@@ -829,10 +789,19 @@ static int bm_fill_super(struct super_block *sb, void *data, int silent)
 	return err;
 }
 
-static struct dentry *bm_mount(struct file_system_type *fs_type,
-	int flags, const char *dev_name, void *data)
+static int bm_get_tree(struct fs_context *fc)
 {
-	return mount_single(fs_type, flags, data, bm_fill_super);
+	return get_tree_single(fc, bm_fill_super);
+}
+
+static const struct fs_context_operations bm_context_ops = {
+	.get_tree	= bm_get_tree,
+};
+
+static int bm_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &bm_context_ops;
+	return 0;
 }
 
 static struct linux_binfmt misc_format = {
@@ -843,7 +812,7 @@ static struct linux_binfmt misc_format = {
 static struct file_system_type bm_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "binfmt_misc",
-	.mount		= bm_mount,
+	.init_fs_context = bm_init_fs_context,
 	.kill_sb	= kill_litter_super,
 };
 MODULE_ALIAS_FS("binfmt_misc");

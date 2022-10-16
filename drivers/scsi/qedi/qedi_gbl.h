@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * QLogic iSCSI Offload Driver
  * Copyright (c) 2016 Cavium Inc.
- *
- * This software is available under the terms of the GNU General Public License
- * (GPL) Version 2, available from the file COPYING in the main directory of
- * this source tree.
  */
 
 #ifndef _QEDI_GBL_H_
@@ -23,9 +20,9 @@ extern uint qedi_io_tracing;
 extern struct scsi_host_template qedi_host_template;
 extern struct iscsi_transport qedi_iscsi_transport;
 extern const struct qed_iscsi_ops *qedi_ops;
-extern struct qedi_debugfs_ops qedi_debugfs_ops;
-extern const struct file_operations qedi_dbg_fops;
-extern struct device_attribute *qedi_shost_attrs[];
+extern const struct qedi_debugfs_ops qedi_debugfs_ops[];
+extern const struct file_operations qedi_dbg_fops[];
+extern const struct attribute_group *qedi_shost_groups[];
 
 int qedi_alloc_sq(struct qedi_ctx *qedi, struct qedi_endpoint *ep);
 void qedi_free_sq(struct qedi_ctx *qedi, struct qedi_endpoint *ep);
@@ -34,8 +31,7 @@ int qedi_send_iscsi_login(struct qedi_conn *qedi_conn,
 			  struct iscsi_task *task);
 int qedi_send_iscsi_logout(struct qedi_conn *qedi_conn,
 			   struct iscsi_task *task);
-int qedi_iscsi_abort_work(struct qedi_conn *qedi_conn,
-			  struct iscsi_task *mtask);
+int qedi_send_iscsi_tmf(struct qedi_conn *qedi_conn, struct iscsi_task *mtask);
 int qedi_send_iscsi_text(struct qedi_conn *qedi_conn,
 			 struct iscsi_task *task);
 int qedi_send_iscsi_nopout(struct qedi_conn *qedi_conn,

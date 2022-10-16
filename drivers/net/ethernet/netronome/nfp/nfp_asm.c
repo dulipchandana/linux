@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2016-2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2016-2018 Netronome Systems, Inc. */
 
 #include <linux/bitops.h>
 #include <linux/errno.h>
@@ -48,6 +18,8 @@ const struct cmd_tgt_act cmd_tgt_act[__CMD_TGT_MAP_SIZE] = {
 	[CMD_TGT_READ32_SWAP] =		{ 0x02, 0x5c },
 	[CMD_TGT_READ_LE] =		{ 0x01, 0x40 },
 	[CMD_TGT_READ_SWAP_LE] =	{ 0x03, 0x40 },
+	[CMD_TGT_ADD] =			{ 0x00, 0x47 },
+	[CMD_TGT_ADD_IMM] =		{ 0x02, 0x47 },
 };
 
 static bool unreg_is_imm(u16 reg)
@@ -165,7 +137,7 @@ static u16 nfp_swreg_to_unreg(swreg reg, bool is_dst)
 				val;
 		case NN_LM_MOD_DEC:
 			lm_dec = true;
-			/* fall through */
+			fallthrough;
 		case NN_LM_MOD_INC:
 			if (val) {
 				pr_err("LM offset in inc/dev mode\n");
@@ -224,7 +196,7 @@ int swreg_to_unrestricted(swreg dst, swreg lreg, swreg rreg,
 	}
 
 	reg->dst_lmextn = swreg_lmextn(dst);
-	reg->src_lmextn = swreg_lmextn(lreg) | swreg_lmextn(rreg);
+	reg->src_lmextn = swreg_lmextn(lreg) || swreg_lmextn(rreg);
 
 	return 0;
 }
@@ -305,7 +277,7 @@ int swreg_to_restricted(swreg dst, swreg lreg, swreg rreg,
 	}
 
 	reg->dst_lmextn = swreg_lmextn(dst);
-	reg->src_lmextn = swreg_lmextn(lreg) | swreg_lmextn(rreg);
+	reg->src_lmextn = swreg_lmextn(lreg) || swreg_lmextn(rreg);
 
 	return 0;
 }

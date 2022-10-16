@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * perf.c
  *
@@ -8,19 +7,26 @@
  * perf top, perf record, perf report, etc.) are started.
  */
 #include "builtin.h"
+#include "perf.h"
 
+#include "util/build-id.h"
+#include "util/cache.h"
 #include "util/env.h"
+#include <internal/lib.h> // page_size
 #include <subcmd/exec-cmd.h>
 #include "util/config.h"
-#include "util/quote.h"
 #include <subcmd/run-command.h>
 #include "util/parse-events.h"
 #include <subcmd/parse-options.h>
 #include "util/bpf-loader.h"
 #include "util/debug.h"
 #include "util/event.h"
+#include "util/util.h" // usage()
+#include "ui/ui.h"
+#include "perf-sys.h"
 #include <api/fs/fs.h>
 #include <api/fs/tracing_path.h>
+#include <perf/core.h>
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -30,6 +36,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
+#include <linux/zalloc.h>
 
 const char perf_usage_string[] =
 	"perf [--version] [--help] [OPTIONS] COMMAND [ARGS]";
@@ -47,6 +55,7 @@ struct cmd_struct {
 };
 
 static struct cmd_struct commands[] = {
+	{ "archive",	NULL,	0 },
 	{ "buildid-cache", cmd_buildid_cache, 0 },
 	{ "buildid-list", cmd_buildid_list, 0 },
 	{ "config",	cmd_config,	0 },
@@ -54,6 +63,7 @@ static struct cmd_struct commands[] = {
 	{ "diff",	cmd_diff,	0 },
 	{ "evlist",	cmd_evlist,	0 },
 	{ "help",	cmd_help,	0 },
+	{ "iostat",	NULL,	0 },
 	{ "kallsyms",	cmd_kallsyms,	0 },
 	{ "list",	cmd_list,	0 },
 	{ "record",	cmd_record,	0 },
@@ -73,13 +83,15 @@ static struct cmd_struct commands[] = {
 	{ "lock",	cmd_lock,	0 },
 	{ "kvm",	cmd_kvm,	0 },
 	{ "test",	cmd_test,	0 },
-#if defined(HAVE_LIBAUDIT_SUPPORT) || defined(HAVE_SYSCALL_TABLE)
+#if defined(HAVE_LIBAUDIT_SUPPORT) || defined(HAVE_SYSCALL_TABLE_SUPPORT)
 	{ "trace",	cmd_trace,	0 },
 #endif
 	{ "inject",	cmd_inject,	0 },
 	{ "mem",	cmd_mem,	0 },
 	{ "data",	cmd_data,	0 },
 	{ "ftrace",	cmd_ftrace,	0 },
+	{ "daemon",	cmd_daemon,	0 },
+	{ "kwork",	cmd_kwork,	0 },
 };
 
 struct pager_config {
@@ -87,10 +99,16 @@ struct pager_config {
 	int val;
 };
 
+static bool same_cmd_with_prefix(const char *var, struct pager_config *c,
+				  const char *header)
+{
+	return (strstarts(var, header) && !strcmp(var + strlen(header), c->cmd));
+}
+
 static int pager_command_config(const char *var, const char *value, void *data)
 {
 	struct pager_config *c = data;
-	if (strstarts(var, "pager.") && !strcmp(var + 6, c->cmd))
+	if (same_cmd_with_prefix(var, c, "pager."))
 		c->val = perf_config_bool(var, value);
 	return 0;
 }
@@ -109,9 +127,9 @@ static int check_pager_config(const char *cmd)
 static int browser_command_config(const char *var, const char *value, void *data)
 {
 	struct pager_config *c = data;
-	if (strstarts(var, "tui.") && !strcmp(var + 4, c->cmd))
+	if (same_cmd_with_prefix(var, c, "tui."))
 		c->val = perf_config_bool(var, value);
-	if (strstarts(var, "gtk.") && !strcmp(var + 4, c->cmd))
+	if (same_cmd_with_prefix(var, c, "gtk."))
 		c->val = perf_config_bool(var, value) ? 2 : 0;
 	return 0;
 }
@@ -190,6 +208,12 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 			break;
 		}
 
+		if (!strcmp(cmd, "-vv")) {
+			(*argv)[0] = "version";
+			version_verbose = 1;
+			break;
+		}
+
 		/*
 		 * Check remaining flags.
 		 */
@@ -232,7 +256,7 @@ static int handle_options(const char ***argv, int *argc, int *envchanged)
 			(*argc)--;
 		} else if (strstarts(cmd, CMD_DEBUGFS_DIR)) {
 			tracing_path_set(cmd + strlen(CMD_DEBUGFS_DIR));
-			fprintf(stderr, "dir: %s\n", tracing_path);
+			fprintf(stderr, "dir: %s\n", tracing_path_mount());
 			if (envchanged)
 				*envchanged = 1;
 		} else if (!strcmp(cmd, "--list-cmds")) {
@@ -293,6 +317,7 @@ static int run_builtin(struct cmd_struct *p, int argc, const char **argv)
 		use_pager = 1;
 	commit_pager_choice();
 
+	perf_env__init(&perf_env);
 	perf_env__set_cmdline(&perf_env, argc, argv);
 	status = p->fn(argc, argv);
 	perf_config__exit();
@@ -344,6 +369,8 @@ static void handle_internal_command(int argc, const char **argv)
 
 	for (i = 0; i < ARRAY_SIZE(commands); i++) {
 		struct cmd_struct *p = commands+i;
+		if (p->fn == NULL)
+			continue;
 		if (strcmp(p->cmd, cmd))
 			continue;
 		exit(run_builtin(p, argc, argv));
@@ -415,36 +442,25 @@ void pthread__unblock_sigwinch(void)
 	pthread_sigmask(SIG_UNBLOCK, &set, NULL);
 }
 
-#ifdef _SC_LEVEL1_DCACHE_LINESIZE
-#define cache_line_size(cacheline_sizep) *cacheline_sizep = sysconf(_SC_LEVEL1_DCACHE_LINESIZE)
-#else
-static void cache_line_size(int *cacheline_sizep)
+static int libperf_print(enum libperf_print_level level,
+			 const char *fmt, va_list ap)
 {
-	if (sysfs__read_int("devices/system/cpu/cpu0/cache/index0/coherency_line_size", cacheline_sizep))
-		pr_debug("cannot determine cache line size");
+	return veprintf(level, verbose, fmt, ap);
 }
-#endif
 
 int main(int argc, const char **argv)
 {
 	int err;
 	const char *cmd;
 	char sbuf[STRERR_BUFSIZE];
-	int value;
+
+	perf_debug_setup();
 
 	/* libsubcmd init */
 	exec_cmd_init("perf", PREFIX, PERF_EXEC_PATH, EXEC_PATH_ENVIRONMENT);
 	pager_init(PERF_PAGER_ENVIRONMENT);
 
-	/* The page_size is placed in util object. */
-	page_size = sysconf(_SC_PAGE_SIZE);
-	cache_line_size(&cacheline_size);
-
-	if (sysctl__read_int("kernel/perf_event_max_stack", &value) == 0)
-		sysctl_perf_event_max_stack = value;
-
-	if (sysctl__read_int("kernel/perf_event_max_contexts_per_stack", &value) == 0)
-		sysctl_perf_event_max_contexts_per_stack = value;
+	libperf_init(libperf_print);
 
 	cmd = extract_argv0_path(argv[0]);
 	if (!cmd)
@@ -452,14 +468,13 @@ int main(int argc, const char **argv)
 
 	srandom(time(NULL));
 
-	perf_config__init();
+	/* Setting $PERF_CONFIG makes perf read _only_ the given config file. */
+	config_exclusive_filename = getenv("PERF_CONFIG");
+
 	err = perf_config(perf_default_config, NULL);
 	if (err)
 		return err;
 	set_buildid_dir(NULL);
-
-	/* get debugfs/tracefs mount point from /proc/mounts */
-	tracing_path_mount();
 
 	/*
 	 * "perf-xxxx" is the same as "perf xxxx", but we obviously:
@@ -485,7 +500,7 @@ int main(int argc, const char **argv)
 		argv[0] = cmd;
 	}
 	if (strstarts(cmd, "trace")) {
-#if defined(HAVE_LIBAUDIT_SUPPORT) || defined(HAVE_SYSCALL_TABLE)
+#if defined(HAVE_LIBAUDIT_SUPPORT) || defined(HAVE_SYSCALL_TABLE_SUPPORT)
 		setup_path();
 		argv[0] = "trace";
 		return cmd_trace(argc, argv);
@@ -528,8 +543,6 @@ int main(int argc, const char **argv)
 	 * forever while the signal goes to some other non interested thread.
 	 */
 	pthread__block_sigwinch();
-
-	perf_debug_setup();
 
 	while (1) {
 		static int done_help;

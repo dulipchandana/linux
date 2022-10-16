@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include <linux/ctype.h>
@@ -90,10 +86,12 @@ const char *aa_splitn_fqname(const char *fqname, size_t n, const char **ns_name,
 	const char *end = fqname + n;
 	const char *name = skipn_spaces(fqname, n);
 
-	if (!name)
-		return NULL;
 	*ns_name = NULL;
 	*ns_len = 0;
+
+	if (!name)
+		return NULL;
+
 	if (name[0] == ':') {
 		char *split = strnchr(&name[1], end - &name[1], ':');
 		*ns_name = skipn_spaces(&name[1], end - &name[1]);
@@ -138,7 +136,7 @@ __counted char *aa_str_alloc(int size, gfp_t gfp)
 {
 	struct counted_str *str;
 
-	str = kmalloc(sizeof(struct counted_str) + size, gfp);
+	str = kmalloc(struct_size(str, name, size), gfp);
 	if (!str)
 		return NULL;
 
@@ -198,20 +196,30 @@ const char *aa_file_perm_names[] = {
 /**
  * aa_perm_mask_to_str - convert a perm mask to its short string
  * @str: character buffer to store string in (at least 10 characters)
+ * @str_size: size of the @str buffer
+ * @chrs: NUL-terminated character buffer of permission characters
  * @mask: permission mask to convert
  */
-void aa_perm_mask_to_str(char *str, const char *chrs, u32 mask)
+void aa_perm_mask_to_str(char *str, size_t str_size, const char *chrs, u32 mask)
 {
 	unsigned int i, perm = 1;
+	size_t num_chrs = strlen(chrs);
 
-	for (i = 0; i < 32; perm <<= 1, i++) {
-		if (mask & perm)
+	for (i = 0; i < num_chrs; perm <<= 1, i++) {
+		if (mask & perm) {
+			/* Ensure that one byte is left for NUL-termination */
+			if (WARN_ON_ONCE(str_size <= 1))
+				break;
+
 			*str++ = chrs[i];
+			str_size--;
+		}
 	}
 	*str = '\0';
 }
 
-void aa_audit_perm_names(struct audit_buffer *ab, const char **names, u32 mask)
+void aa_audit_perm_names(struct audit_buffer *ab, const char * const *names,
+			 u32 mask)
 {
 	const char *fmt = "%s";
 	unsigned int i, perm = 1;
@@ -229,13 +237,13 @@ void aa_audit_perm_names(struct audit_buffer *ab, const char **names, u32 mask)
 }
 
 void aa_audit_perm_mask(struct audit_buffer *ab, u32 mask, const char *chrs,
-			u32 chrsmask, const char **names, u32 namesmask)
+			u32 chrsmask, const char * const *names, u32 namesmask)
 {
 	char str[33];
 
 	audit_log_format(ab, "\"");
 	if ((mask & chrsmask) && chrs) {
-		aa_perm_mask_to_str(str, chrs, mask & chrsmask);
+		aa_perm_mask_to_str(str, sizeof(str), chrs, mask & chrsmask);
 		mask &= ~chrsmask;
 		audit_log_format(ab, "%s", str);
 		if (mask & namesmask)
@@ -284,13 +292,13 @@ void aa_apply_modes_to_perms(struct aa_profile *profile, struct aa_perms *perms)
 	switch (AUDIT_MODE(profile)) {
 	case AUDIT_ALL:
 		perms->audit = ALL_PERMS_MASK;
-		/* fall through */
+		fallthrough;
 	case AUDIT_NOQUIET:
 		perms->quiet = 0;
 		break;
 	case AUDIT_QUIET:
 		perms->audit = 0;
-		/* fall through */
+		fallthrough;
 	case AUDIT_QUIET_DENIED:
 		perms->quiet = ALL_PERMS_MASK;
 		break;
@@ -314,22 +322,39 @@ static u32 map_other(u32 x)
 		((x & 0x60) << 19);	/* SETOPT/GETOPT */
 }
 
+static u32 map_xbits(u32 x)
+{
+	return ((x & 0x1) << 7) |
+		((x & 0x7e) << 9);
+}
+
 void aa_compute_perms(struct aa_dfa *dfa, unsigned int state,
 		      struct aa_perms *perms)
 {
+	/* This mapping is convulated due to history.
+	 * v1-v4: only file perms
+	 * v5: added policydb which dropped in perm user conditional to
+	 *     gain new perm bits, but had to map around the xbits because
+	 *     the userspace compiler was still munging them.
+	 * v9: adds using the xbits in policydb because the compiler now
+	 *     supports treating policydb permission bits different.
+	 *     Unfortunately there is not way to force auditing on the
+	 *     perms represented by the xbits
+	 */
 	*perms = (struct aa_perms) {
-		.allow = dfa_user_allow(dfa, state),
+		.allow = dfa_user_allow(dfa, state) |
+			 map_xbits(dfa_user_xbits(dfa, state)),
 		.audit = dfa_user_audit(dfa, state),
-		.quiet = dfa_user_quiet(dfa, state),
+		.quiet = dfa_user_quiet(dfa, state) |
+			 map_xbits(dfa_other_xbits(dfa, state)),
 	};
 
-	/* for v5 perm mapping in the policydb, the other set is used
+	/* for v5-v9 perm mapping in the policydb, the other set is used
 	 * to extend the general perm set
 	 */
 	perms->allow |= map_other(dfa_other_allow(dfa, state));
 	perms->audit |= map_other(dfa_other_audit(dfa, state));
 	perms->quiet |= map_other(dfa_other_quiet(dfa, state));
-//	perms->xindex = dfa_user_xindex(dfa, state);
 }
 
 /**
@@ -407,7 +432,7 @@ int aa_profile_label_perm(struct aa_profile *profile, struct aa_profile *target,
  * @request: requested perms
  * @deny: Returns: explicit deny set
  * @sa: initialized audit structure (MAY BE NULL if not auditing)
- * @cb: callback fn for tpye specific fields (MAY BE NULL)
+ * @cb: callback fn for type specific fields (MAY BE NULL)
  *
  * Returns: 0 if permission else error code
  *

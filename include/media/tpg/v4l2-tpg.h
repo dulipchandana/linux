@@ -1,20 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * v4l2-tpg.h - Test Pattern Generator
  *
  * Copyright 2014 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 
 #ifndef _V4L2_TPG_H_
@@ -222,6 +210,7 @@ struct tpg_data {
 	bool				show_square;
 	bool				insert_sav;
 	bool				insert_eav;
+	bool				insert_hdmi_video_guard_band;
 
 	/* Test pattern movement */
 	enum tpg_move_mode		mv_hor_mode;
@@ -253,7 +242,7 @@ void tpg_log_status(struct tpg_data *tpg);
 
 void tpg_set_font(const u8 *f);
 void tpg_gen_text(const struct tpg_data *tpg,
-		u8 *basep[TPG_MAX_PLANES][2], int y, int x, char *text);
+		u8 *basep[TPG_MAX_PLANES][2], int y, int x, const char *text);
 void tpg_calc_text_basep(struct tpg_data *tpg,
 		u8 *basep[TPG_MAX_PLANES][2], unsigned p, u8 *vbuf);
 unsigned tpg_g_interleaved_plane(const struct tpg_data *tpg, unsigned buf_line);
@@ -264,6 +253,7 @@ void tpg_fillbuffer(struct tpg_data *tpg, v4l2_std_id std,
 bool tpg_s_fourcc(struct tpg_data *tpg, u32 fourcc);
 void tpg_s_crop_compose(struct tpg_data *tpg, const struct v4l2_rect *crop,
 		const struct v4l2_rect *compose);
+const char *tpg_g_color_order(const struct tpg_data *tpg);
 
 static inline void tpg_s_pattern(struct tpg_data *tpg, enum tpg_pattern pattern)
 {
@@ -336,6 +326,7 @@ static inline void tpg_s_saturation(struct tpg_data *tpg,
 static inline void tpg_s_hue(struct tpg_data *tpg,
 					s16 hue)
 {
+	hue = clamp_t(s16, hue, -128, 128);
 	if (tpg->hue == hue)
 		return;
 	tpg->hue = hue;
@@ -599,6 +590,21 @@ static inline void tpg_s_insert_sav(struct tpg_data *tpg, bool insert_sav)
 static inline void tpg_s_insert_eav(struct tpg_data *tpg, bool insert_eav)
 {
 	tpg->insert_eav = insert_eav;
+}
+
+/*
+ * This inserts 4 pixels of the RGB color 0xab55ab at the left hand side of the
+ * image. This is only done for 3 or 4 byte RGB pixel formats. This pixel value
+ * equals the Video Guard Band value as defined by HDMI (see section 5.2.2.1
+ * in the HDMI 1.3 Specification) that preceeds the first actual pixel. If the
+ * HDMI receiver doesn't handle this correctly, then it might keep skipping
+ * these Video Guard Band patterns and end up with a shorter video line. So this
+ * is a nice pattern to test with.
+ */
+static inline void tpg_s_insert_hdmi_video_guard_band(struct tpg_data *tpg,
+						      bool insert_hdmi_video_guard_band)
+{
+	tpg->insert_hdmi_video_guard_band = insert_hdmi_video_guard_band;
 }
 
 void tpg_update_mv_step(struct tpg_data *tpg);

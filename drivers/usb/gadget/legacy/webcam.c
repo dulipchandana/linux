@@ -30,9 +30,6 @@ static unsigned int streaming_maxburst;
 module_param(streaming_maxburst, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(streaming_maxburst, "0 - 15 (ss only)");
 
-static unsigned int trace;
-module_param(trace, uint, S_IRUGO|S_IWUSR);
-MODULE_PARM_DESC(trace, "Trace level bitmask");
 /* --------------------------------------------------------------------------
  * Device descriptor
  */
@@ -93,7 +90,7 @@ static const struct UVC_HEADER_DESCRIPTOR(1) uvc_control_header = {
 	.bLength		= UVC_DT_HEADER_SIZE(1),
 	.bDescriptorType	= USB_DT_CS_INTERFACE,
 	.bDescriptorSubType	= UVC_VC_HEADER,
-	.bcdUVC			= cpu_to_le16(0x0100),
+	.bcdUVC			= cpu_to_le16(0x0110),
 	.wTotalLength		= 0, /* dynamic */
 	.dwClockFrequency	= cpu_to_le32(48000000),
 	.bInCollection		= 0, /* dynamic */
@@ -128,6 +125,7 @@ static const struct uvc_processing_unit_descriptor uvc_processing = {
 	.bmControls[0]		= 1,
 	.bmControls[1]		= 0,
 	.iProcessing		= 0,
+	.bmVideoStandards	= 0,
 };
 
 static const struct uvc_output_terminal_descriptor uvc_output_terminal = {
@@ -379,7 +377,6 @@ webcam_bind(struct usb_composite_dev *cdev)
 	uvc_opts->streaming_interval = streaming_interval;
 	uvc_opts->streaming_maxpacket = streaming_maxpacket;
 	uvc_opts->streaming_maxburst = streaming_maxburst;
-	uvc_set_trace_param(trace);
 
 	uvc_opts->fs_control = uvc_fs_control_cls;
 	uvc_opts->ss_control = uvc_ss_control_cls;

@@ -39,13 +39,11 @@ static inline int ufs_add_nondir(struct dentry *dentry, struct inode *inode)
 {
 	int err = ufs_add_link(dentry, inode);
 	if (!err) {
-		unlock_new_inode(inode);
-		d_instantiate(dentry, inode);
+		d_instantiate_new(dentry, inode);
 		return 0;
 	}
 	inode_dec_link_count(inode);
-	unlock_new_inode(inode);
-	iput(inode);
+	discard_new_inode(inode);
 	return err;
 }
 
@@ -71,7 +69,8 @@ static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry, unsi
  * If the create succeeds, we fill in the inode information
  * with d_instantiate(). 
  */
-static int ufs_create (struct inode * dir, struct dentry * dentry, umode_t mode,
+static int ufs_create (struct user_namespace * mnt_userns,
+		struct inode * dir, struct dentry * dentry, umode_t mode,
 		bool excl)
 {
 	struct inode *inode;
@@ -87,7 +86,8 @@ static int ufs_create (struct inode * dir, struct dentry * dentry, umode_t mode,
 	return ufs_add_nondir(dentry, inode);
 }
 
-static int ufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t rdev)
+static int ufs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
+		     struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct inode *inode;
 	int err;
@@ -106,8 +106,8 @@ static int ufs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev
 	return err;
 }
 
-static int ufs_symlink (struct inode * dir, struct dentry * dentry,
-	const char * symname)
+static int ufs_symlink (struct user_namespace * mnt_userns, struct inode * dir,
+	struct dentry * dentry, const char * symname)
 {
 	struct super_block * sb = dir->i_sb;
 	int err;
@@ -143,8 +143,7 @@ static int ufs_symlink (struct inode * dir, struct dentry * dentry,
 
 out_fail:
 	inode_dec_link_count(inode);
-	unlock_new_inode(inode);
-	iput(inode);
+	discard_new_inode(inode);
 	return err;
 }
 
@@ -167,7 +166,8 @@ static int ufs_link (struct dentry * old_dentry, struct inode * dir,
 	return error;
 }
 
-static int ufs_mkdir(struct inode * dir, struct dentry * dentry, umode_t mode)
+static int ufs_mkdir(struct user_namespace * mnt_userns, struct inode * dir,
+	struct dentry * dentry, umode_t mode)
 {
 	struct inode * inode;
 	int err;
@@ -193,15 +193,13 @@ static int ufs_mkdir(struct inode * dir, struct dentry * dentry, umode_t mode)
 	if (err)
 		goto out_fail;
 
-	unlock_new_inode(inode);
-	d_instantiate(dentry, inode);
+	d_instantiate_new(dentry, inode);
 	return 0;
 
 out_fail:
 	inode_dec_link_count(inode);
 	inode_dec_link_count(inode);
-	unlock_new_inode(inode);
-	iput (inode);
+	discard_new_inode(inode);
 out_dir:
 	inode_dec_link_count(dir);
 	return err;
@@ -245,9 +243,9 @@ static int ufs_rmdir (struct inode * dir, struct dentry *dentry)
 	return err;
 }
 
-static int ufs_rename(struct inode *old_dir, struct dentry *old_dentry,
-		      struct inode *new_dir, struct dentry *new_dentry,
-		      unsigned int flags)
+static int ufs_rename(struct user_namespace *mnt_userns, struct inode *old_dir,
+		      struct dentry *old_dentry, struct inode *new_dir,
+		      struct dentry *new_dentry, unsigned int flags)
 {
 	struct inode *old_inode = d_inode(old_dentry);
 	struct inode *new_inode = d_inode(new_dentry);

@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright © 2012-2016 VMware, Inc., Palo Alto, CA., USA
- * All Rights Reserved.
+ * Copyright 2012-2016 VMware, Inc., Palo Alto, CA., USA
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -117,7 +117,7 @@ int vmw_stream_unref_ioctl(struct drm_device *dev, void *data,
 	struct drm_vmw_stream_arg *arg = (struct drm_vmw_stream_arg *)data;
 
 	return ttm_ref_object_base_unref(vmw_fpriv(file_priv)->tfile,
-					 arg->stream_id, TTM_REF_USAGE);
+					 arg->stream_id);
 }
 
 /**

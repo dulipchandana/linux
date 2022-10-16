@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2006 - 2007 Ivo van Doorn
  * Copyright (C) 2007 Dmitry Torokhov
  * Copyright 2009 Johannes Berg <johannes@sipsolutions.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/kernel.h>
@@ -52,6 +40,7 @@ struct rfkill {
 	enum rfkill_type	type;
 
 	unsigned long		state;
+	unsigned long		hard_block_reasons;
 
 	u32			idx;
 
@@ -80,7 +69,7 @@ struct rfkill {
 
 struct rfkill_int_event {
 	struct list_head	list;
-	struct rfkill_event	ev;
+	struct rfkill_event_ext	ev;
 };
 
 struct rfkill_data {
@@ -89,6 +78,7 @@ struct rfkill_data {
 	struct mutex		mtx;
 	wait_queue_head_t	read_wait;
 	bool			input_handler;
+	u8			max_size;
 };
 
 
@@ -141,13 +131,15 @@ static void rfkill_led_trigger_event(struct rfkill *rfkill)
 		led_trigger_event(trigger, LED_FULL);
 }
 
-static void rfkill_led_trigger_activate(struct led_classdev *led)
+static int rfkill_led_trigger_activate(struct led_classdev *led)
 {
 	struct rfkill *rfkill;
 
 	rfkill = container_of(led->trigger, struct rfkill, led_trigger);
 
 	rfkill_led_trigger_event(rfkill);
+
+	return 0;
 }
 
 const char *rfkill_get_led_trigger_name(struct rfkill *rfkill)
@@ -178,9 +170,10 @@ static void rfkill_led_trigger_unregister(struct rfkill *rfkill)
 }
 
 static struct led_trigger rfkill_any_led_trigger;
-static struct work_struct rfkill_any_work;
+static struct led_trigger rfkill_none_led_trigger;
+static struct work_struct rfkill_global_led_trigger_work;
 
-static void rfkill_any_led_trigger_worker(struct work_struct *work)
+static void rfkill_global_led_trigger_worker(struct work_struct *work)
 {
 	enum led_brightness brightness = LED_OFF;
 	struct rfkill *rfkill;
@@ -195,30 +188,43 @@ static void rfkill_any_led_trigger_worker(struct work_struct *work)
 	mutex_unlock(&rfkill_global_mutex);
 
 	led_trigger_event(&rfkill_any_led_trigger, brightness);
+	led_trigger_event(&rfkill_none_led_trigger,
+			  brightness == LED_OFF ? LED_FULL : LED_OFF);
 }
 
-static void rfkill_any_led_trigger_event(void)
+static void rfkill_global_led_trigger_event(void)
 {
-	schedule_work(&rfkill_any_work);
+	schedule_work(&rfkill_global_led_trigger_work);
 }
 
-static void rfkill_any_led_trigger_activate(struct led_classdev *led_cdev)
+static int rfkill_global_led_trigger_register(void)
 {
-	rfkill_any_led_trigger_event();
-}
+	int ret;
 
-static int rfkill_any_led_trigger_register(void)
-{
-	INIT_WORK(&rfkill_any_work, rfkill_any_led_trigger_worker);
+	INIT_WORK(&rfkill_global_led_trigger_work,
+			rfkill_global_led_trigger_worker);
+
 	rfkill_any_led_trigger.name = "rfkill-any";
-	rfkill_any_led_trigger.activate = rfkill_any_led_trigger_activate;
-	return led_trigger_register(&rfkill_any_led_trigger);
+	ret = led_trigger_register(&rfkill_any_led_trigger);
+	if (ret)
+		return ret;
+
+	rfkill_none_led_trigger.name = "rfkill-none";
+	ret = led_trigger_register(&rfkill_none_led_trigger);
+	if (ret)
+		led_trigger_unregister(&rfkill_any_led_trigger);
+	else
+		/* Delay activation until all global triggers are registered */
+		rfkill_global_led_trigger_event();
+
+	return ret;
 }
 
-static void rfkill_any_led_trigger_unregister(void)
+static void rfkill_global_led_trigger_unregister(void)
 {
+	led_trigger_unregister(&rfkill_none_led_trigger);
 	led_trigger_unregister(&rfkill_any_led_trigger);
-	cancel_work_sync(&rfkill_any_work);
+	cancel_work_sync(&rfkill_global_led_trigger_work);
 }
 #else
 static void rfkill_led_trigger_event(struct rfkill *rfkill)
@@ -234,21 +240,22 @@ static inline void rfkill_led_trigger_unregister(struct rfkill *rfkill)
 {
 }
 
-static void rfkill_any_led_trigger_event(void)
+static void rfkill_global_led_trigger_event(void)
 {
 }
 
-static int rfkill_any_led_trigger_register(void)
+static int rfkill_global_led_trigger_register(void)
 {
 	return 0;
 }
 
-static void rfkill_any_led_trigger_unregister(void)
+static void rfkill_global_led_trigger_unregister(void)
 {
 }
 #endif /* CONFIG_RFKILL_LEDS */
 
-static void rfkill_fill_event(struct rfkill_event *ev, struct rfkill *rfkill,
+static void rfkill_fill_event(struct rfkill_event_ext *ev,
+			      struct rfkill *rfkill,
 			      enum rfkill_operation op)
 {
 	unsigned long flags;
@@ -261,6 +268,7 @@ static void rfkill_fill_event(struct rfkill_event *ev, struct rfkill *rfkill,
 	ev->hard = !!(rfkill->state & RFKILL_BLOCK_HW);
 	ev->soft = !!(rfkill->state & (RFKILL_BLOCK_SW |
 					RFKILL_BLOCK_SW_PREV));
+	ev->hard_block_reasons = rfkill->hard_block_reasons;
 	spin_unlock_irqrestore(&rfkill->lock, flags);
 }
 
@@ -354,7 +362,7 @@ static void rfkill_set_block(struct rfkill *rfkill, bool blocked)
 	spin_unlock_irqrestore(&rfkill->lock, flags);
 
 	rfkill_led_trigger_event(rfkill);
-	rfkill_any_led_trigger_event();
+	rfkill_global_led_trigger_event();
 
 	if (prev != curr)
 		rfkill_event(rfkill);
@@ -494,8 +502,8 @@ void rfkill_remove_epo_lock(void)
 /**
  * rfkill_is_epo_lock_active - returns true EPO is active
  *
- * Returns 0 (false) if there is NOT an active EPO contidion,
- * and 1 (true) if there is an active EPO contition, which
+ * Returns 0 (false) if there is NOT an active EPO condition,
+ * and 1 (true) if there is an active EPO condition, which
  * locks all radios in one of the BLOCKED states.
  *
  * Can be called in atomic context.
@@ -518,31 +526,41 @@ bool rfkill_get_global_sw_state(const enum rfkill_type type)
 }
 #endif
 
-bool rfkill_set_hw_state(struct rfkill *rfkill, bool blocked)
+bool rfkill_set_hw_state_reason(struct rfkill *rfkill,
+				bool blocked, unsigned long reason)
 {
 	unsigned long flags;
 	bool ret, prev;
 
 	BUG_ON(!rfkill);
 
+	if (WARN(reason &
+	    ~(RFKILL_HARD_BLOCK_SIGNAL | RFKILL_HARD_BLOCK_NOT_OWNER),
+	    "hw_state reason not supported: 0x%lx", reason))
+		return blocked;
+
 	spin_lock_irqsave(&rfkill->lock, flags);
-	prev = !!(rfkill->state & RFKILL_BLOCK_HW);
-	if (blocked)
+	prev = !!(rfkill->hard_block_reasons & reason);
+	if (blocked) {
 		rfkill->state |= RFKILL_BLOCK_HW;
-	else
-		rfkill->state &= ~RFKILL_BLOCK_HW;
+		rfkill->hard_block_reasons |= reason;
+	} else {
+		rfkill->hard_block_reasons &= ~reason;
+		if (!rfkill->hard_block_reasons)
+			rfkill->state &= ~RFKILL_BLOCK_HW;
+	}
 	ret = !!(rfkill->state & RFKILL_BLOCK_ANY);
 	spin_unlock_irqrestore(&rfkill->lock, flags);
 
 	rfkill_led_trigger_event(rfkill);
-	rfkill_any_led_trigger_event();
+	rfkill_global_led_trigger_event();
 
 	if (rfkill->registered && prev != blocked)
 		schedule_work(&rfkill->uevent_work);
 
 	return ret;
 }
-EXPORT_SYMBOL(rfkill_set_hw_state);
+EXPORT_SYMBOL(rfkill_set_hw_state_reason);
 
 static void __rfkill_set_sw_state(struct rfkill *rfkill, bool blocked)
 {
@@ -579,7 +597,7 @@ bool rfkill_set_sw_state(struct rfkill *rfkill, bool blocked)
 		schedule_work(&rfkill->uevent_work);
 
 	rfkill_led_trigger_event(rfkill);
-	rfkill_any_led_trigger_event();
+	rfkill_global_led_trigger_event();
 
 	return blocked;
 }
@@ -629,7 +647,7 @@ void rfkill_set_states(struct rfkill *rfkill, bool sw, bool hw)
 			schedule_work(&rfkill->uevent_work);
 
 		rfkill_led_trigger_event(rfkill);
-		rfkill_any_led_trigger_event();
+		rfkill_global_led_trigger_event();
 	}
 }
 EXPORT_SYMBOL(rfkill_set_states);
@@ -740,6 +758,16 @@ static ssize_t soft_store(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RW(soft);
 
+static ssize_t hard_block_reasons_show(struct device *dev,
+				       struct device_attribute *attr,
+				       char *buf)
+{
+	struct rfkill *rfkill = to_rfkill(dev);
+
+	return sprintf(buf, "0x%lx\n", rfkill->hard_block_reasons);
+}
+static DEVICE_ATTR_RO(hard_block_reasons);
+
 static u8 user_state_from_blocked(unsigned long state)
 {
 	if (state & RFKILL_BLOCK_HW)
@@ -792,6 +820,7 @@ static struct attribute *rfkill_dev_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_soft.attr,
 	&dev_attr_hard.attr,
+	&dev_attr_hard_block_reasons.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(rfkill_dev);
@@ -807,6 +836,7 @@ static int rfkill_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct rfkill *rfkill = to_rfkill(dev);
 	unsigned long flags;
+	unsigned long reasons;
 	u32 state;
 	int error;
 
@@ -819,10 +849,13 @@ static int rfkill_dev_uevent(struct device *dev, struct kobj_uevent_env *env)
 		return error;
 	spin_lock_irqsave(&rfkill->lock, flags);
 	state = rfkill->state;
+	reasons = rfkill->hard_block_reasons;
 	spin_unlock_irqrestore(&rfkill->lock, flags);
 	error = add_uevent_var(env, "RFKILL_STATE=%d",
 			       user_state_from_blocked(state));
-	return error;
+	if (error)
+		return error;
+	return add_uevent_var(env, "RFKILL_HW_BLOCK_REASON=0x%lx", reasons);
 }
 
 void rfkill_pause_polling(struct rfkill *rfkill)
@@ -872,6 +905,9 @@ static int rfkill_resume(struct device *dev)
 
 	rfkill->suspended = false;
 
+	if (!rfkill->registered)
+		return 0;
+
 	if (!rfkill->persistent) {
 		cur = !!(rfkill->state & RFKILL_BLOCK_SW);
 		rfkill_set_block(rfkill, cur);
@@ -911,6 +947,18 @@ bool rfkill_blocked(struct rfkill *rfkill)
 }
 EXPORT_SYMBOL(rfkill_blocked);
 
+bool rfkill_soft_blocked(struct rfkill *rfkill)
+{
+	unsigned long flags;
+	u32 state;
+
+	spin_lock_irqsave(&rfkill->lock, flags);
+	state = rfkill->state;
+	spin_unlock_irqrestore(&rfkill->lock, flags);
+
+	return !!(state & RFKILL_BLOCK_SW);
+}
+EXPORT_SYMBOL(rfkill_soft_blocked);
 
 struct rfkill * __must_check rfkill_alloc(const char *name,
 					  struct device *parent,
@@ -998,10 +1046,13 @@ static void rfkill_sync_work(struct work_struct *work)
 int __must_check rfkill_register(struct rfkill *rfkill)
 {
 	static unsigned long rfkill_no;
-	struct device *dev = &rfkill->dev;
+	struct device *dev;
 	int error;
 
-	BUG_ON(!rfkill);
+	if (!rfkill)
+		return -EINVAL;
+
+	dev = &rfkill->dev;
 
 	mutex_lock(&rfkill_global_mutex);
 
@@ -1046,7 +1097,7 @@ int __must_check rfkill_register(struct rfkill *rfkill)
 #endif
 	}
 
-	rfkill_any_led_trigger_event();
+	rfkill_global_led_trigger_event();
 	rfkill_send_events(rfkill, RFKILL_OP_ADD);
 
 	mutex_unlock(&rfkill_global_mutex);
@@ -1079,7 +1130,7 @@ void rfkill_unregister(struct rfkill *rfkill)
 	mutex_lock(&rfkill_global_mutex);
 	rfkill_send_events(rfkill, RFKILL_OP_DEL);
 	list_del_init(&rfkill->node);
-	rfkill_any_led_trigger_event();
+	rfkill_global_led_trigger_event();
 	mutex_unlock(&rfkill_global_mutex);
 
 	rfkill_led_trigger_unregister(rfkill);
@@ -1102,6 +1153,8 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 	data = kzalloc(sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
+
+	data->max_size = RFKILL_EVENT_SIZE_V1;
 
 	INIT_LIST_HEAD(&data->events);
 	mutex_init(&data->mtx);
@@ -1127,7 +1180,7 @@ static int rfkill_fop_open(struct inode *inode, struct file *file)
 
 	file->private_data = data;
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 
  free:
 	mutex_unlock(&data->mtx);
@@ -1185,6 +1238,7 @@ static ssize_t rfkill_fop_read(struct file *file, char __user *buf,
 				list);
 
 	sz = min_t(unsigned long, sizeof(ev->ev), count);
+	sz = min_t(unsigned long, sz, data->max_size);
 	ret = sz;
 	if (copy_to_user(buf, &ev->ev, sz))
 		ret = -EFAULT;
@@ -1199,8 +1253,9 @@ static ssize_t rfkill_fop_read(struct file *file, char __user *buf,
 static ssize_t rfkill_fop_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *pos)
 {
+	struct rfkill_data *data = file->private_data;
 	struct rfkill *rfkill;
-	struct rfkill_event ev;
+	struct rfkill_event_ext ev;
 	int ret;
 
 	/* we don't need the 'hard' variable but accept it */
@@ -1213,6 +1268,7 @@ static ssize_t rfkill_fop_write(struct file *file, const char __user *buf,
 	 * our API version even in a write() call, if it cares.
 	 */
 	count = min(count, sizeof(ev));
+	count = min_t(size_t, count, data->max_size);
 	if (copy_from_user(&ev, buf, count))
 		return -EFAULT;
 
@@ -1272,31 +1328,47 @@ static int rfkill_fop_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-#ifdef CONFIG_RFKILL_INPUT
 static long rfkill_fop_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct rfkill_data *data = file->private_data;
+	int ret = -ENOSYS;
+	u32 size;
 
 	if (_IOC_TYPE(cmd) != RFKILL_IOC_MAGIC)
 		return -ENOSYS;
 
-	if (_IOC_NR(cmd) != RFKILL_IOC_NOINPUT)
-		return -ENOSYS;
-
 	mutex_lock(&data->mtx);
-
-	if (!data->input_handler) {
-		if (atomic_inc_return(&rfkill_input_disabled) == 1)
-			printk(KERN_DEBUG "rfkill: input handler disabled\n");
-		data->input_handler = true;
+	switch (_IOC_NR(cmd)) {
+#ifdef CONFIG_RFKILL_INPUT
+	case RFKILL_IOC_NOINPUT:
+		if (!data->input_handler) {
+			if (atomic_inc_return(&rfkill_input_disabled) == 1)
+				printk(KERN_DEBUG "rfkill: input handler disabled\n");
+			data->input_handler = true;
+		}
+		ret = 0;
+		break;
+#endif
+	case RFKILL_IOC_MAX_SIZE:
+		if (get_user(size, (__u32 __user *)arg)) {
+			ret = -EFAULT;
+			break;
+		}
+		if (size < RFKILL_EVENT_SIZE_V1 || size > U8_MAX) {
+			ret = -EINVAL;
+			break;
+		}
+		data->max_size = size;
+		ret = 0;
+		break;
+	default:
+		break;
 	}
-
 	mutex_unlock(&data->mtx);
 
-	return 0;
+	return ret;
 }
-#endif
 
 static const struct file_operations rfkill_fops = {
 	.owner		= THIS_MODULE,
@@ -1305,17 +1377,17 @@ static const struct file_operations rfkill_fops = {
 	.write		= rfkill_fop_write,
 	.poll		= rfkill_fop_poll,
 	.release	= rfkill_fop_release,
-#ifdef CONFIG_RFKILL_INPUT
 	.unlocked_ioctl	= rfkill_fop_ioctl,
-	.compat_ioctl	= rfkill_fop_ioctl,
-#endif
+	.compat_ioctl	= compat_ptr_ioctl,
 	.llseek		= no_llseek,
 };
 
+#define RFKILL_NAME "rfkill"
+
 static struct miscdevice rfkill_miscdev = {
-	.name	= "rfkill",
 	.fops	= &rfkill_fops,
-	.minor	= MISC_DYNAMIC_MINOR,
+	.name	= RFKILL_NAME,
+	.minor	= RFKILL_MINOR,
 };
 
 static int __init rfkill_init(void)
@@ -1332,7 +1404,7 @@ static int __init rfkill_init(void)
 	if (error)
 		goto error_misc;
 
-	error = rfkill_any_led_trigger_register();
+	error = rfkill_global_led_trigger_register();
 	if (error)
 		goto error_led_trigger;
 
@@ -1346,7 +1418,7 @@ static int __init rfkill_init(void)
 
 #ifdef CONFIG_RFKILL_INPUT
 error_input:
-	rfkill_any_led_trigger_unregister();
+	rfkill_global_led_trigger_unregister();
 #endif
 error_led_trigger:
 	misc_deregister(&rfkill_miscdev);
@@ -1362,8 +1434,11 @@ static void __exit rfkill_exit(void)
 #ifdef CONFIG_RFKILL_INPUT
 	rfkill_handler_exit();
 #endif
-	rfkill_any_led_trigger_unregister();
+	rfkill_global_led_trigger_unregister();
 	misc_deregister(&rfkill_miscdev);
 	class_unregister(&rfkill_class);
 }
 module_exit(rfkill_exit);
+
+MODULE_ALIAS_MISCDEV(RFKILL_MINOR);
+MODULE_ALIAS("devname:" RFKILL_NAME);

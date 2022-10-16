@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/extcon/extcon.c - External Connector (extcon) framework.
  *
@@ -11,15 +12,6 @@
  * based on android/drivers/switch/switch_class.c
  * Copyright (C) 2008 Google, Inc.
  * Author: Mike Lockwood <lockwood@android.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
@@ -175,6 +167,16 @@ static const struct __extcon_info {
 		.id = EXTCON_DISP_HMD,
 		.name = "HMD",
 	},
+	[EXTCON_DISP_CVBS] = {
+		.type = EXTCON_TYPE_DISP,
+		.id = EXTCON_DISP_CVBS,
+		.name = "CVBS",
+	},
+	[EXTCON_DISP_EDP] = {
+		.type = EXTCON_TYPE_DISP,
+		.id = EXTCON_DISP_EDP,
+		.name = "EDP",
+	},
 
 	/* Miscellaneous external connector */
 	[EXTCON_DOCK] = {
@@ -255,7 +257,7 @@ static int find_cable_index_by_id(struct extcon_dev *edev, const unsigned int id
 {
 	int i;
 
-	/* Find the the index of extcon cable in edev->supported_cable */
+	/* Find the index of extcon cable in edev->supported_cable */
 	for (i = 0; i < edev->max_supported; i++) {
 		if (edev->supported_cable[i] == id)
 			return i;
@@ -407,6 +409,7 @@ static ssize_t cable_state_show(struct device *dev,
 /**
  * extcon_sync() - Synchronize the state for an external connector.
  * @edev:	the extcon device
+ * @id:		the unique id indicating an external connector
  *
  * Note that this function send a notification in order to synchronize
  * the state and property of an external connector.
@@ -433,8 +436,8 @@ int extcon_sync(struct extcon_dev *edev, unsigned int id)
 		return index;
 
 	spin_lock_irqsave(&edev->lock, flags);
-
 	state = !!(edev->state & BIT(index));
+	spin_unlock_irqrestore(&edev->lock, flags);
 
 	/*
 	 * Call functions in a raw notifier chain for the specific one
@@ -448,6 +451,7 @@ int extcon_sync(struct extcon_dev *edev, unsigned int id)
 	 */
 	raw_notifier_call_chain(&edev->nh_all, state, edev);
 
+	spin_lock_irqsave(&edev->lock, flags);
 	/* This could be in interrupt handler */
 	prop_buf = (char *)get_zeroed_page(GFP_ATOMIC);
 	if (!prop_buf) {
@@ -583,19 +587,7 @@ EXPORT_SYMBOL_GPL(extcon_set_state);
  */
 int extcon_set_state_sync(struct extcon_dev *edev, unsigned int id, bool state)
 {
-	int ret, index;
-	unsigned long flags;
-
-	index = find_cable_index_by_id(edev, id);
-	if (index < 0)
-		return index;
-
-	/* Check whether the external connector's state is changed. */
-	spin_lock_irqsave(&edev->lock, flags);
-	ret = is_extcon_changed(edev, index, state);
-	spin_unlock_irqrestore(&edev->lock, flags);
-	if (!ret)
-		return 0;
+	int ret;
 
 	ret = extcon_set_state(edev, id, state);
 	if (ret < 0)
@@ -627,7 +619,7 @@ int extcon_get_property(struct extcon_dev *edev, unsigned int id,
 	unsigned long flags;
 	int index, ret = 0;
 
-	*prop_val = (union extcon_property_value)(0);
+	*prop_val = (union extcon_property_value){0};
 
 	if (!edev)
 		return -EINVAL;
@@ -755,6 +747,9 @@ EXPORT_SYMBOL_GPL(extcon_set_property);
 
 /**
  * extcon_set_property_sync() - Set property of an external connector with sync.
+ * @edev:	the extcon device
+ * @id:		the unique id indicating an external connector
+ * @prop:	the property id indicating an extcon property
  * @prop_val:	the pointer including the new value of extcon property
  *
  * Note that when setting the property value of external connector,
@@ -870,6 +865,8 @@ EXPORT_SYMBOL_GPL(extcon_set_property_capability);
  * @extcon_name:	the extcon name provided with extcon_dev_register()
  *
  * Return the pointer of extcon device if success or ERR_PTR(err) if fail.
+ * NOTE: This function returns -EPROBE_DEFER so it may only be called from
+ * probe() functions.
  */
 struct extcon_dev *extcon_get_extcon_dev(const char *extcon_name)
 {
@@ -883,7 +880,7 @@ struct extcon_dev *extcon_get_extcon_dev(const char *extcon_name)
 		if (!strcmp(sd->name, extcon_name))
 			goto out;
 	}
-	sd = NULL;
+	sd = ERR_PTR(-EPROBE_DEFER);
 out:
 	mutex_unlock(&extcon_dev_list_lock);
 	return sd;
@@ -907,7 +904,7 @@ int extcon_register_notifier(struct extcon_dev *edev, unsigned int id,
 			     struct notifier_block *nb)
 {
 	unsigned long flags;
-	int ret, idx = -EINVAL;
+	int ret, idx;
 
 	if (!edev || !nb)
 		return -EINVAL;
@@ -1122,12 +1119,12 @@ int extcon_dev_register(struct extcon_dev *edev)
 			(unsigned long)atomic_inc_return(&edev_no));
 
 	if (edev->max_supported) {
-		char buf[10];
 		char *str;
 		struct extcon_cable *cable;
 
-		edev->cables = kzalloc(sizeof(struct extcon_cable) *
-				       edev->max_supported, GFP_KERNEL);
+		edev->cables = kcalloc(edev->max_supported,
+				       sizeof(struct extcon_cable),
+				       GFP_KERNEL);
 		if (!edev->cables) {
 			ret = -ENOMEM;
 			goto err_sysfs_alloc;
@@ -1135,9 +1132,7 @@ int extcon_dev_register(struct extcon_dev *edev)
 		for (index = 0; index < edev->max_supported; index++) {
 			cable = &edev->cables[index];
 
-			snprintf(buf, 10, "cable.%d", index);
-			str = kzalloc(sizeof(char) * (strlen(buf) + 1),
-				      GFP_KERNEL);
+			str = kasprintf(GFP_KERNEL, "cable.%d", index);
 			if (!str) {
 				for (index--; index >= 0; index--) {
 					cable = &edev->cables[index];
@@ -1147,7 +1142,6 @@ int extcon_dev_register(struct extcon_dev *edev)
 
 				goto err_alloc_cables;
 			}
-			strcpy(str, buf);
 
 			cable->edev = edev;
 			cable->cable_index = index;
@@ -1170,22 +1164,23 @@ int extcon_dev_register(struct extcon_dev *edev)
 	}
 
 	if (edev->max_supported && edev->mutually_exclusive) {
-		char buf[80];
 		char *name;
 
 		/* Count the size of mutually_exclusive array */
 		for (index = 0; edev->mutually_exclusive[index]; index++)
 			;
 
-		edev->attrs_muex = kzalloc(sizeof(struct attribute *) *
-					   (index + 1), GFP_KERNEL);
+		edev->attrs_muex = kcalloc(index + 1,
+					   sizeof(struct attribute *),
+					   GFP_KERNEL);
 		if (!edev->attrs_muex) {
 			ret = -ENOMEM;
 			goto err_muex;
 		}
 
-		edev->d_attrs_muex = kzalloc(sizeof(struct device_attribute) *
-					     index, GFP_KERNEL);
+		edev->d_attrs_muex = kcalloc(index,
+					     sizeof(struct device_attribute),
+					     GFP_KERNEL);
 		if (!edev->d_attrs_muex) {
 			ret = -ENOMEM;
 			kfree(edev->attrs_muex);
@@ -1193,9 +1188,8 @@ int extcon_dev_register(struct extcon_dev *edev)
 		}
 
 		for (index = 0; edev->mutually_exclusive[index]; index++) {
-			sprintf(buf, "0x%x", edev->mutually_exclusive[index]);
-			name = kzalloc(sizeof(char) * (strlen(buf) + 1),
-				       GFP_KERNEL);
+			name = kasprintf(GFP_KERNEL, "0x%x",
+					 edev->mutually_exclusive[index]);
 			if (!name) {
 				for (index--; index >= 0; index--) {
 					kfree(edev->d_attrs_muex[index].attr.
@@ -1206,7 +1200,6 @@ int extcon_dev_register(struct extcon_dev *edev)
 				ret = -ENOMEM;
 				goto err_muex;
 			}
-			strcpy(name, buf);
 			sysfs_attr_init(&edev->d_attrs_muex[index].attr);
 			edev->d_attrs_muex[index].attr.name = name;
 			edev->d_attrs_muex[index].attr.mode = 0000;
@@ -1220,8 +1213,9 @@ int extcon_dev_register(struct extcon_dev *edev)
 
 	if (edev->max_supported) {
 		edev->extcon_dev_type.groups =
-			kzalloc(sizeof(struct attribute_group *) *
-				(edev->max_supported + 2), GFP_KERNEL);
+			kcalloc(edev->max_supported + 2,
+				sizeof(struct attribute_group *),
+				GFP_KERNEL);
 		if (!edev->extcon_dev_type.groups) {
 			ret = -ENOMEM;
 			goto err_alloc_groups;
@@ -1240,18 +1234,14 @@ int extcon_dev_register(struct extcon_dev *edev)
 		edev->dev.type = &edev->extcon_dev_type;
 	}
 
-	ret = device_register(&edev->dev);
-	if (ret) {
-		put_device(&edev->dev);
-		goto err_dev;
-	}
-
 	spin_lock_init(&edev->lock);
-	edev->nh = devm_kcalloc(&edev->dev, edev->max_supported,
-				sizeof(*edev->nh), GFP_KERNEL);
-	if (!edev->nh) {
-		ret = -ENOMEM;
-		goto err_dev;
+	if (edev->max_supported) {
+		edev->nh = kcalloc(edev->max_supported, sizeof(*edev->nh),
+				GFP_KERNEL);
+		if (!edev->nh) {
+			ret = -ENOMEM;
+			goto err_alloc_nh;
+		}
 	}
 
 	for (index = 0; index < edev->max_supported; index++)
@@ -1262,6 +1252,12 @@ int extcon_dev_register(struct extcon_dev *edev)
 	dev_set_drvdata(&edev->dev, edev);
 	edev->state = 0;
 
+	ret = device_register(&edev->dev);
+	if (ret) {
+		put_device(&edev->dev);
+		goto err_dev;
+	}
+
 	mutex_lock(&extcon_dev_list_lock);
 	list_add(&edev->entry, &extcon_dev_list);
 	mutex_unlock(&extcon_dev_list_lock);
@@ -1269,6 +1265,9 @@ int extcon_dev_register(struct extcon_dev *edev)
 	return 0;
 
 err_dev:
+	if (edev->max_supported)
+		kfree(edev->nh);
+err_alloc_nh:
 	if (edev->max_supported)
 		kfree(edev->extcon_dev_type.groups);
 err_alloc_groups:
@@ -1329,6 +1328,7 @@ void extcon_dev_unregister(struct extcon_dev *edev)
 	if (edev->max_supported) {
 		kfree(edev->extcon_dev_type.groups);
 		kfree(edev->cables);
+		kfree(edev->nh);
 	}
 
 	put_device(&edev->dev);
@@ -1336,6 +1336,28 @@ void extcon_dev_unregister(struct extcon_dev *edev)
 EXPORT_SYMBOL_GPL(extcon_dev_unregister);
 
 #ifdef CONFIG_OF
+
+/*
+ * extcon_find_edev_by_node - Find the extcon device from devicetree.
+ * @node	: OF node identifying edev
+ *
+ * Return the pointer of extcon device if success or ERR_PTR(err) if fail.
+ */
+struct extcon_dev *extcon_find_edev_by_node(struct device_node *node)
+{
+	struct extcon_dev *edev;
+
+	mutex_lock(&extcon_dev_list_lock);
+	list_for_each_entry(edev, &extcon_dev_list, entry)
+		if (edev->dev.parent && edev->dev.parent->of_node == node)
+			goto out;
+	edev = ERR_PTR(-EPROBE_DEFER);
+out:
+	mutex_unlock(&extcon_dev_list_lock);
+
+	return edev;
+}
+
 /*
  * extcon_get_edev_by_phandle - Get the extcon device from devicetree.
  * @dev		: the instance to the given device
@@ -1363,25 +1385,27 @@ struct extcon_dev *extcon_get_edev_by_phandle(struct device *dev, int index)
 		return ERR_PTR(-ENODEV);
 	}
 
-	mutex_lock(&extcon_dev_list_lock);
-	list_for_each_entry(edev, &extcon_dev_list, entry) {
-		if (edev->dev.parent && edev->dev.parent->of_node == node) {
-			mutex_unlock(&extcon_dev_list_lock);
-			of_node_put(node);
-			return edev;
-		}
-	}
-	mutex_unlock(&extcon_dev_list_lock);
+	edev = extcon_find_edev_by_node(node);
 	of_node_put(node);
 
-	return ERR_PTR(-EPROBE_DEFER);
+	return edev;
 }
+
 #else
+
+struct extcon_dev *extcon_find_edev_by_node(struct device_node *node)
+{
+	return ERR_PTR(-ENOSYS);
+}
+
 struct extcon_dev *extcon_get_edev_by_phandle(struct device *dev, int index)
 {
 	return ERR_PTR(-ENOSYS);
 }
+
 #endif /* CONFIG_OF */
+
+EXPORT_SYMBOL_GPL(extcon_find_edev_by_node);
 EXPORT_SYMBOL_GPL(extcon_get_edev_by_phandle);
 
 /**
@@ -1392,6 +1416,7 @@ const char *extcon_get_edev_name(struct extcon_dev *edev)
 {
 	return !edev ? NULL : edev->name;
 }
+EXPORT_SYMBOL_GPL(extcon_get_edev_name);
 
 static int __init extcon_class_init(void)
 {

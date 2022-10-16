@@ -21,150 +21,121 @@
 #include "internal.h"
 
 /*
- * Set up an interest-in-callbacks record for a volume on a server and
- * register it with the server.
- * - Called with volume->server_sem held.
+ * Handle invalidation of an mmap'd file.  We invalidate all the PTEs referring
+ * to the pages in this file's pagecache, forcing the kernel to go through
+ * ->fault() or ->page_mkwrite() - at which point we can handle invalidation
+ * more fully.
  */
-int afs_register_server_cb_interest(struct afs_vnode *vnode,
-				    struct afs_server_entry *entry)
+void afs_invalidate_mmap_work(struct work_struct *work)
 {
-	struct afs_cb_interest *cbi = entry->cb_interest, *vcbi, *new, *x;
-	struct afs_server *server = entry->server;
+	struct afs_vnode *vnode = container_of(work, struct afs_vnode, cb_work);
 
-again:
-	vcbi = vnode->cb_interest;
-	if (vcbi) {
-		if (vcbi == cbi)
-			return 0;
+	unmap_mapping_pages(vnode->netfs.inode.i_mapping, 0, 0, false);
+}
 
-		if (cbi && vcbi->server == cbi->server) {
-			write_seqlock(&vnode->cb_lock);
-			vnode->cb_interest = afs_get_cb_interest(cbi);
-			write_sequnlock(&vnode->cb_lock);
-			afs_put_cb_interest(afs_v2net(vnode), cbi);
-			return 0;
-		}
+void afs_server_init_callback_work(struct work_struct *work)
+{
+	struct afs_server *server = container_of(work, struct afs_server, initcb_work);
+	struct afs_vnode *vnode;
+	struct afs_cell *cell = server->cell;
 
-		if (!cbi && vcbi->server == server) {
-			afs_get_cb_interest(vcbi);
-			x = cmpxchg(&entry->cb_interest, cbi, vcbi);
-			if (x != cbi) {
-				cbi = x;
-				afs_put_cb_interest(afs_v2net(vnode), vcbi);
-				goto again;
-			}
-			return 0;
+	down_read(&cell->fs_open_mmaps_lock);
+
+	list_for_each_entry(vnode, &cell->fs_open_mmaps, cb_mmap_link) {
+		if (vnode->cb_server == server) {
+			clear_bit(AFS_VNODE_CB_PROMISED, &vnode->flags);
+			queue_work(system_unbound_wq, &vnode->cb_work);
 		}
 	}
 
-	if (!cbi) {
-		new = kzalloc(sizeof(struct afs_cb_interest), GFP_KERNEL);
-		if (!new)
-			return -ENOMEM;
-
-		refcount_set(&new->usage, 1);
-		new->sb = vnode->vfs_inode.i_sb;
-		new->vid = vnode->volume->vid;
-		new->server = afs_get_server(server);
-		INIT_LIST_HEAD(&new->cb_link);
-
-		write_lock(&server->cb_break_lock);
-		list_add_tail(&new->cb_link, &server->cb_interests);
-		write_unlock(&server->cb_break_lock);
-
-		x = cmpxchg(&entry->cb_interest, cbi, new);
-		if (x == cbi) {
-			cbi = new;
-		} else {
-			cbi = x;
-			afs_put_cb_interest(afs_v2net(vnode), new);
-		}
-	}
-
-	ASSERT(cbi);
-
-	/* Change the server the vnode is using.  This entails scrubbing any
-	 * interest the vnode had in the previous server it was using.
-	 */
-	write_seqlock(&vnode->cb_lock);
-
-	vnode->cb_interest = afs_get_cb_interest(cbi);
-	vnode->cb_s_break = cbi->server->cb_s_break;
-	clear_bit(AFS_VNODE_CB_PROMISED, &vnode->flags);
-
-	write_sequnlock(&vnode->cb_lock);
-	return 0;
+	up_read(&cell->fs_open_mmaps_lock);
 }
 
 /*
- * Set a vnode's interest on a server.
- */
-void afs_set_cb_interest(struct afs_vnode *vnode, struct afs_cb_interest *cbi)
-{
-	struct afs_cb_interest *old_cbi = NULL;
-
-	if (vnode->cb_interest == cbi)
-		return;
-
-	write_seqlock(&vnode->cb_lock);
-	if (vnode->cb_interest != cbi) {
-		afs_get_cb_interest(cbi);
-		old_cbi = vnode->cb_interest;
-		vnode->cb_interest = cbi;
-	}
-	write_sequnlock(&vnode->cb_lock);
-	afs_put_cb_interest(afs_v2net(vnode), cbi);
-}
-
-/*
- * Remove an interest on a server.
- */
-void afs_put_cb_interest(struct afs_net *net, struct afs_cb_interest *cbi)
-{
-	if (cbi && refcount_dec_and_test(&cbi->usage)) {
-		if (!list_empty(&cbi->cb_link)) {
-			write_lock(&cbi->server->cb_break_lock);
-			list_del_init(&cbi->cb_link);
-			write_unlock(&cbi->server->cb_break_lock);
-			afs_put_server(net, cbi->server);
-		}
-		kfree(cbi);
-	}
-}
-
-/*
- * allow the fileserver to request callback state (re-)initialisation
+ * Allow the fileserver to request callback state (re-)initialisation.
+ * Unfortunately, UUIDs are not guaranteed unique.
  */
 void afs_init_callback_state(struct afs_server *server)
 {
-	if (!test_and_clear_bit(AFS_SERVER_FL_NEW, &server->flags))
+	rcu_read_lock();
+	do {
 		server->cb_s_break++;
+		atomic_inc(&server->cell->fs_s_break);
+		if (!list_empty(&server->cell->fs_open_mmaps))
+			queue_work(system_unbound_wq, &server->initcb_work);
+
+	} while ((server = rcu_dereference(server->uuid_next)));
+	rcu_read_unlock();
 }
 
 /*
  * actually break a callback
  */
-void afs_break_callback(struct afs_vnode *vnode)
+void __afs_break_callback(struct afs_vnode *vnode, enum afs_cb_break_reason reason)
 {
 	_enter("");
 
-	write_seqlock(&vnode->cb_lock);
-
+	clear_bit(AFS_VNODE_NEW_CONTENT, &vnode->flags);
 	if (test_and_clear_bit(AFS_VNODE_CB_PROMISED, &vnode->flags)) {
 		vnode->cb_break++;
+		vnode->cb_v_break = vnode->volume->cb_v_break;
 		afs_clear_permits(vnode);
 
-		spin_lock(&vnode->lock);
-
-		_debug("break callback");
-
-		if (list_empty(&vnode->granted_locks) &&
-		    !list_empty(&vnode->pending_locks))
+		if (vnode->lock_state == AFS_VNODE_LOCK_WAITING_FOR_CB)
 			afs_lock_may_be_available(vnode);
-		spin_unlock(&vnode->lock);
-	}
 
+		if (reason != afs_cb_break_for_deleted &&
+		    vnode->status.type == AFS_FTYPE_FILE &&
+		    atomic_read(&vnode->cb_nr_mmap))
+			queue_work(system_unbound_wq, &vnode->cb_work);
+
+		trace_afs_cb_break(&vnode->fid, vnode->cb_break, reason, true);
+	} else {
+		trace_afs_cb_break(&vnode->fid, vnode->cb_break, reason, false);
+	}
+}
+
+void afs_break_callback(struct afs_vnode *vnode, enum afs_cb_break_reason reason)
+{
+	write_seqlock(&vnode->cb_lock);
+	__afs_break_callback(vnode, reason);
 	write_sequnlock(&vnode->cb_lock);
+}
+
+/*
+ * Look up a volume by volume ID under RCU conditions.
+ */
+static struct afs_volume *afs_lookup_volume_rcu(struct afs_cell *cell,
+						afs_volid_t vid)
+{
+	struct afs_volume *volume = NULL;
+	struct rb_node *p;
+	int seq = 0;
+
+	do {
+		/* Unfortunately, rbtree walking doesn't give reliable results
+		 * under just the RCU read lock, so we have to check for
+		 * changes.
+		 */
+		read_seqbegin_or_lock(&cell->volume_lock, &seq);
+
+		p = rcu_dereference_raw(cell->volumes.rb_node);
+		while (p) {
+			volume = rb_entry(p, struct afs_volume, cell_node);
+
+			if (volume->vid < vid)
+				p = rcu_dereference_raw(p->rb_left);
+			else if (volume->vid > vid)
+				p = rcu_dereference_raw(p->rb_right);
+			else
+				break;
+			volume = NULL;
+		}
+
+	} while (need_seqretry(&cell->volume_lock, seq));
+
+	done_seqretry(&cell->volume_lock, seq);
+	return volume;
 }
 
 /*
@@ -173,72 +144,85 @@ void afs_break_callback(struct afs_vnode *vnode)
  *   - the backing file is changed
  *   - a lock is released
  */
-static void afs_break_one_callback(struct afs_server *server,
+static void afs_break_one_callback(struct afs_volume *volume,
 				   struct afs_fid *fid)
 {
-	struct afs_cb_interest *cbi;
-	struct afs_iget_data data;
+	struct super_block *sb;
 	struct afs_vnode *vnode;
 	struct inode *inode;
 
-	read_lock(&server->cb_break_lock);
-
-	/* Step through all interested superblocks.  There may be more than one
-	 * because of cell aliasing.
-	 */
-	list_for_each_entry(cbi, &server->cb_interests, cb_link) {
-		if (cbi->vid != fid->vid)
-			continue;
-
-		data.volume = NULL;
-		data.fid = *fid;
-		inode = ilookup5_nowait(cbi->sb, fid->vnode, afs_iget5_test, &data);
-		if (inode) {
-			vnode = AFS_FS_I(inode);
-			afs_break_callback(vnode);
-			iput(inode);
-		}
+	if (fid->vnode == 0 && fid->unique == 0) {
+		/* The callback break applies to an entire volume. */
+		write_lock(&volume->cb_v_break_lock);
+		volume->cb_v_break++;
+		trace_afs_cb_break(fid, volume->cb_v_break,
+				   afs_cb_break_for_volume_callback, false);
+		write_unlock(&volume->cb_v_break_lock);
+		return;
 	}
 
-	read_unlock(&server->cb_break_lock);
+	/* See if we can find a matching inode - even an I_NEW inode needs to
+	 * be marked as it can have its callback broken before we finish
+	 * setting up the local inode.
+	 */
+	sb = rcu_dereference(volume->sb);
+	if (!sb)
+		return;
+
+	inode = find_inode_rcu(sb, fid->vnode, afs_ilookup5_test_by_fid, fid);
+	if (inode) {
+		vnode = AFS_FS_I(inode);
+		afs_break_callback(vnode, afs_cb_break_for_callback);
+	} else {
+		trace_afs_cb_miss(fid, afs_cb_break_for_callback);
+	}
+}
+
+static void afs_break_some_callbacks(struct afs_server *server,
+				     struct afs_callback_break *cbb,
+				     size_t *_count)
+{
+	struct afs_callback_break *residue = cbb;
+	struct afs_volume *volume;
+	afs_volid_t vid = cbb->fid.vid;
+	size_t i;
+
+	volume = afs_lookup_volume_rcu(server->cell, vid);
+
+	/* TODO: Find all matching volumes if we couldn't match the server and
+	 * break them anyway.
+	 */
+
+	for (i = *_count; i > 0; cbb++, i--) {
+		if (cbb->fid.vid == vid) {
+			_debug("- Fid { vl=%08llx n=%llu u=%u }",
+			       cbb->fid.vid,
+			       cbb->fid.vnode,
+			       cbb->fid.unique);
+			--*_count;
+			if (volume)
+				afs_break_one_callback(volume, &cbb->fid);
+		} else {
+			*residue++ = *cbb;
+		}
+	}
 }
 
 /*
  * allow the fileserver to break callback promises
  */
 void afs_break_callbacks(struct afs_server *server, size_t count,
-			 struct afs_callback callbacks[])
+			 struct afs_callback_break *callbacks)
 {
 	_enter("%p,%zu,", server, count);
 
 	ASSERT(server != NULL);
-	ASSERTCMP(count, <=, AFSCBMAX);
 
-	for (; count > 0; callbacks++, count--) {
-		_debug("- Fid { vl=%08x n=%u u=%u }  CB { v=%u x=%u t=%u }",
-		       callbacks->fid.vid,
-		       callbacks->fid.vnode,
-		       callbacks->fid.unique,
-		       callbacks->version,
-		       callbacks->expiry,
-		       callbacks->type
-		       );
-		afs_break_one_callback(server, &callbacks->fid);
-	}
+	rcu_read_lock();
 
-	_leave("");
+	while (count > 0)
+		afs_break_some_callbacks(server, callbacks, &count);
+
+	rcu_read_unlock();
 	return;
-}
-
-/*
- * Clear the callback interests in a server list.
- */
-void afs_clear_callback_interests(struct afs_net *net, struct afs_server_list *slist)
-{
-	int i;
-
-	for (i = 0; i < slist->nr_servers; i++) {
-		afs_put_cb_interest(net, slist->servers[i].cb_interest);
-		slist->servers[i].cb_interest = NULL;
-	}
 }

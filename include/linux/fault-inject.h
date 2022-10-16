@@ -11,7 +11,7 @@
 
 /*
  * For explanation of the elements of this struct, see
- * Documentation/fault-injection/fault-injection.txt
+ * Documentation/fault-injection/fault-injection.rst
  */
 struct fault_attr {
 	unsigned long probability;
@@ -20,6 +20,7 @@ struct fault_attr {
 	atomic_t space;
 	unsigned long verbose;
 	bool task_filter;
+	bool no_warn;
 	unsigned long stacktrace_depth;
 	unsigned long require_start;
 	unsigned long require_end;
@@ -39,6 +40,7 @@ struct fault_attr {
 		.ratelimit_state = RATELIMIT_STATE_INIT_DISABLED,	\
 		.verbose = 2,						\
 		.dname = NULL,						\
+		.no_warn = false,					\
 	}
 
 #define DECLARE_FAULT_ATTR(name) struct fault_attr name = FAULT_ATTR_INITIALIZER
@@ -64,10 +66,13 @@ static inline struct dentry *fault_create_debugfs_attr(const char *name,
 
 struct kmem_cache;
 
+bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order);
+
+int should_failslab(struct kmem_cache *s, gfp_t gfpflags);
 #ifdef CONFIG_FAILSLAB
-extern bool should_failslab(struct kmem_cache *s, gfp_t gfpflags);
+extern bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags);
 #else
-static inline bool should_failslab(struct kmem_cache *s, gfp_t gfpflags)
+static inline bool __should_failslab(struct kmem_cache *s, gfp_t gfpflags)
 {
 	return false;
 }

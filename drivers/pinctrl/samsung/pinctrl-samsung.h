@@ -19,7 +19,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/pinctrl/machine.h>
 
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 
 /**
  * enum pincfg_type - possible pin configuration types supported.
@@ -53,6 +53,14 @@ enum pincfg_type {
 #define PINCFG_UNPACK_TYPE(cfg)		((cfg) & PINCFG_TYPE_MASK)
 #define PINCFG_UNPACK_VALUE(cfg)	(((cfg) & PINCFG_VALUE_MASK) >> \
 						PINCFG_VALUE_SHIFT)
+/*
+ * Values for the pin CON register, choosing pin function.
+ * The basic set (input and output) are same between: S3C24xx, S3C64xx, S5PV210,
+ * Exynos ARMv7, Exynos ARMv8, Tesla FSD.
+ */
+#define PIN_CON_FUNC_INPUT		0x0
+#define PIN_CON_FUNC_OUTPUT		0x1
+
 /**
  * enum eint_type - possible external interrupt types.
  * @EINT_TYPE_NONE: bank does not support external interrupts
@@ -165,13 +173,13 @@ struct samsung_pin_bank {
 
 	u32		pin_base;
 	void		*soc_priv;
-	struct device_node *of_node;
+	struct fwnode_handle *fwnode;
 	struct samsung_pinctrl_drv_data *drvdata;
 	struct irq_domain *irq_domain;
 	struct gpio_chip gpio_chip;
 	struct pinctrl_gpio_range grange;
 	struct exynos_irq_chip *irq_chip;
-	spinlock_t slock;
+	raw_spinlock_t slock;
 
 	u32 pm_save[PINCFG_TYPE_NUM + 1]; /* +1 to handle double CON registers*/
 };
@@ -223,6 +231,13 @@ struct samsung_retention_data {
  *	interrupts for the controller.
  * @eint_wkup_init: platform specific callback to setup the external wakeup
  *	interrupts for the controller.
+ * @suspend: platform specific suspend callback, executed during pin controller
+ *	device suspend, see samsung_pinctrl_suspend()
+ * @resume: platform specific resume callback, executed during pin controller
+ *	device suspend, see samsung_pinctrl_resume()
+ *
+ * External wakeup interrupts must define at least eint_wkup_init,
+ * retention_data and suspend in order for proper suspend/resume to work.
  */
 struct samsung_pin_ctrl {
 	const struct samsung_pin_bank_data *pin_banks;
@@ -255,6 +270,10 @@ struct samsung_pin_ctrl {
  * @pin_base: starting system wide pin number.
  * @nr_pins: number of pins supported by the controller.
  * @retention_ctrl: retention control runtime data.
+ * @suspend: platform specific suspend callback, executed during pin controller
+ *	device suspend, see samsung_pinctrl_suspend()
+ * @resume: platform specific resume callback, executed during pin controller
+ *	device suspend, see samsung_pinctrl_resume()
  */
 struct samsung_pinctrl_drv_data {
 	struct list_head		node;
@@ -279,6 +298,16 @@ struct samsung_pinctrl_drv_data {
 
 	void (*suspend)(struct samsung_pinctrl_drv_data *);
 	void (*resume)(struct samsung_pinctrl_drv_data *);
+};
+
+/**
+ * struct samsung_pinctrl_of_match_data: OF match device specific configuration data.
+ * @ctrl: array of pin controller data.
+ * @num_ctrl: size of array @ctrl.
+ */
+struct samsung_pinctrl_of_match_data {
+	const struct samsung_pin_ctrl	*ctrl;
+	unsigned int			num_ctrl;
 };
 
 /**
@@ -309,20 +338,24 @@ struct samsung_pmx_func {
 };
 
 /* list of all exported SoC specific data */
-extern const struct samsung_pin_ctrl exynos3250_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos4210_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos4x12_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos5250_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos5260_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos5410_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos5420_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos5433_pin_ctrl[];
-extern const struct samsung_pin_ctrl exynos7_pin_ctrl[];
-extern const struct samsung_pin_ctrl s3c64xx_pin_ctrl[];
-extern const struct samsung_pin_ctrl s3c2412_pin_ctrl[];
-extern const struct samsung_pin_ctrl s3c2416_pin_ctrl[];
-extern const struct samsung_pin_ctrl s3c2440_pin_ctrl[];
-extern const struct samsung_pin_ctrl s3c2450_pin_ctrl[];
-extern const struct samsung_pin_ctrl s5pv210_pin_ctrl[];
+extern const struct samsung_pinctrl_of_match_data exynos3250_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos4210_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos4x12_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos5250_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos5260_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos5410_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos5420_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos5433_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos7_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos7885_of_data;
+extern const struct samsung_pinctrl_of_match_data exynos850_of_data;
+extern const struct samsung_pinctrl_of_match_data exynosautov9_of_data;
+extern const struct samsung_pinctrl_of_match_data fsd_of_data;
+extern const struct samsung_pinctrl_of_match_data s3c64xx_of_data;
+extern const struct samsung_pinctrl_of_match_data s3c2412_of_data;
+extern const struct samsung_pinctrl_of_match_data s3c2416_of_data;
+extern const struct samsung_pinctrl_of_match_data s3c2440_of_data;
+extern const struct samsung_pinctrl_of_match_data s3c2450_of_data;
+extern const struct samsung_pinctrl_of_match_data s5pv210_of_data;
 
 #endif /* __PINCTRL_SAMSUNG_H */

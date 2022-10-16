@@ -113,7 +113,7 @@
 	 kctx_len)
 #define CIPHER_TRANSHDR_SIZE(kctx_len, sge_pairs) \
 	(TRANSHDR_SIZE((kctx_len)) + (sge_pairs) +\
-	 sizeof(struct cpl_rx_phys_dsgl))
+	 sizeof(struct cpl_rx_phys_dsgl) + AES_BLOCK_SIZE)
 #define HASH_TRANSHDR_SIZE(kctx_len)\
 	(TRANSHDR_SIZE(kctx_len) + DUMMY_BYTES)
 
@@ -176,6 +176,15 @@
 		      KEY_CONTEXT_SALT_PRESENT_V(1) | \
 		      KEY_CONTEXT_CTX_LEN_V((ctx_len)))
 
+#define  FILL_KEY_CRX_HDR(ck_size, mk_size, d_ck, opad, ctx_len) \
+		htonl(TLS_KEYCTX_RXMK_SIZE_V(mk_size) | \
+		      TLS_KEYCTX_RXCK_SIZE_V(ck_size) | \
+		      TLS_KEYCTX_RX_VALID_V(1) | \
+		      TLS_KEYCTX_RX_SEQCTR_V(3) | \
+		      TLS_KEYCTX_RXAUTH_MODE_V(4) | \
+		      TLS_KEYCTX_RXCIPH_MODE_V(2) | \
+		      TLS_KEYCTX_RXFLIT_CNT_V((ctx_len)))
+
 #define FILL_WR_OP_CCTX_SIZE \
 		htonl( \
 			FW_CRYPTO_LOOKASIDE_WR_OPCODE_V( \
@@ -216,15 +225,15 @@
 #define FILL_CMD_MORE(immdatalen) htonl(ULPTX_CMD_V(ULP_TX_SC_IMM) |\
 					ULP_TX_SC_MORE_V((immdatalen)))
 #define MAX_NK 8
-#define ROUND_16(bytes)		((bytes) & 0xFFFFFFF0)
 #define MAX_DSGL_ENT			32
-#define MIN_CIPHER_SG			1 /* IV */
 #define MIN_AUTH_SG			1 /* IV */
 #define MIN_GCM_SG			1 /* IV */
 #define MIN_DIGEST_SG			1 /*Partial Buffer*/
-#define MIN_CCM_SG			2 /*IV+B0*/
-#define SPACE_LEFT(len) \
-	((SGE_MAX_WR_LEN - WR_MIN_LEN - (len)))
+#define MIN_CCM_SG			1 /*IV+B0*/
+#define CIP_SPACE_LEFT(len) \
+	((SGE_MAX_WR_LEN - CIP_WR_MIN_LEN - (len)))
+#define HASH_SPACE_LEFT(len) \
+	((SGE_MAX_WR_LEN - HASH_WR_MIN_LEN - (len)))
 
 struct algo_param {
 	unsigned int auth_mode;
@@ -233,17 +242,19 @@ struct algo_param {
 };
 
 struct hash_wr_param {
+	struct algo_param alg_prm;
 	unsigned int opad_needed;
 	unsigned int more;
 	unsigned int last;
-	struct algo_param alg_prm;
+	unsigned int kctx_len;
 	unsigned int sg_len;
 	unsigned int bfr_len;
+	unsigned int hash_size;
 	u64 scmd1;
 };
 
 struct cipher_wr_param {
-	struct ablkcipher_request *req;
+	struct skcipher_request *req;
 	char *iv;
 	int bytes;
 	unsigned short qid;
@@ -289,26 +300,26 @@ struct phys_sge_pairs {
 };
 
 
-static const u32 sha1_init[SHA1_DIGEST_SIZE / 4] = {
+static const u32 chcr_sha1_init[SHA1_DIGEST_SIZE / 4] = {
 		SHA1_H0, SHA1_H1, SHA1_H2, SHA1_H3, SHA1_H4,
 };
 
-static const u32 sha224_init[SHA256_DIGEST_SIZE / 4] = {
+static const u32 chcr_sha224_init[SHA256_DIGEST_SIZE / 4] = {
 		SHA224_H0, SHA224_H1, SHA224_H2, SHA224_H3,
 		SHA224_H4, SHA224_H5, SHA224_H6, SHA224_H7,
 };
 
-static const u32 sha256_init[SHA256_DIGEST_SIZE / 4] = {
+static const u32 chcr_sha256_init[SHA256_DIGEST_SIZE / 4] = {
 		SHA256_H0, SHA256_H1, SHA256_H2, SHA256_H3,
 		SHA256_H4, SHA256_H5, SHA256_H6, SHA256_H7,
 };
 
-static const u64 sha384_init[SHA512_DIGEST_SIZE / 8] = {
+static const u64 chcr_sha384_init[SHA512_DIGEST_SIZE / 8] = {
 		SHA384_H0, SHA384_H1, SHA384_H2, SHA384_H3,
 		SHA384_H4, SHA384_H5, SHA384_H6, SHA384_H7,
 };
 
-static const u64 sha512_init[SHA512_DIGEST_SIZE / 8] = {
+static const u64 chcr_sha512_init[SHA512_DIGEST_SIZE / 8] = {
 		SHA512_H0, SHA512_H1, SHA512_H2, SHA512_H3,
 		SHA512_H4, SHA512_H5, SHA512_H6, SHA512_H7,
 };
@@ -318,21 +329,21 @@ static inline void copy_hash_init_values(char *key, int digestsize)
 	u8 i;
 	__be32 *dkey = (__be32 *)key;
 	u64 *ldkey = (u64 *)key;
-	__be64 *sha384 = (__be64 *)sha384_init;
-	__be64 *sha512 = (__be64 *)sha512_init;
+	__be64 *sha384 = (__be64 *)chcr_sha384_init;
+	__be64 *sha512 = (__be64 *)chcr_sha512_init;
 
 	switch (digestsize) {
 	case SHA1_DIGEST_SIZE:
 		for (i = 0; i < SHA1_INIT_STATE; i++)
-			dkey[i] = cpu_to_be32(sha1_init[i]);
+			dkey[i] = cpu_to_be32(chcr_sha1_init[i]);
 		break;
 	case SHA224_DIGEST_SIZE:
 		for (i = 0; i < SHA224_INIT_STATE; i++)
-			dkey[i] = cpu_to_be32(sha224_init[i]);
+			dkey[i] = cpu_to_be32(chcr_sha224_init[i]);
 		break;
 	case SHA256_DIGEST_SIZE:
 		for (i = 0; i < SHA256_INIT_STATE; i++)
-			dkey[i] = cpu_to_be32(sha256_init[i]);
+			dkey[i] = cpu_to_be32(chcr_sha256_init[i]);
 		break;
 	case SHA384_DIGEST_SIZE:
 		for (i = 0; i < SHA384_INIT_STATE; i++)
@@ -344,10 +355,6 @@ static inline void copy_hash_init_values(char *key, int digestsize)
 		break;
 	}
 }
-
-static const u8 sgl_lengths[20] = {
-	0, 1, 2, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 10, 11, 12, 13, 13, 14, 15
-};
 
 /* Number of len fields(8) * size of one addr field */
 #define PHYSDSGL_MAX_LEN_SIZE 16

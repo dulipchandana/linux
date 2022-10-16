@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI DaVinci EVM board support
  *
  * Author: Kevin Hilman, Deep Root Systems, LLC
  *
- * 2007 (c) MontaVista Software, Inc. This file is licensed under
- * the terms of the GNU General Public License version 2. This program
- * is licensed "as is" without any warranty of any kind, whether express
- * or implied.
+ * 2007 (c) MontaVista Software, Inc.
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -19,6 +17,7 @@
 #include <linux/gpio.h>
 #include <linux/gpio/machine.h>
 #include <linux/clk.h>
+#include <linux/dm9000.h>
 #include <linux/videodev2.h>
 #include <media/i2c/tvp514x.h>
 #include <linux/spi/spi.h>
@@ -32,9 +31,8 @@
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-#include <mach/serial.h>
-#include <mach/common.h>
-
+#include "serial.h"
+#include "common.h"
 #include "davinci.h"
 
 /* NOTE:  this is geared for the standard config, with a socketed
@@ -77,10 +75,11 @@ static struct mtd_partition davinci_nand_partitions[] = {
 };
 
 static struct davinci_nand_pdata davinci_nand_data = {
+	.core_chipsel		= 0,
 	.mask_chipsel		= BIT(14),
 	.parts			= davinci_nand_partitions,
 	.nr_parts		= ARRAY_SIZE(davinci_nand_partitions),
-	.ecc_mode		= NAND_ECC_HW,
+	.engine_type		= NAND_ECC_ENGINE_TYPE_ON_HOST,
 	.bbt_options		= NAND_BBT_USE_FLASH,
 	.ecc_bits		= 4,
 };
@@ -109,13 +108,17 @@ static struct platform_device davinci_nand_device = {
 	},
 };
 
+#define DM355_I2C_SDA_PIN	GPIO_TO_PIN(0, 15)
+#define DM355_I2C_SCL_PIN	GPIO_TO_PIN(0, 14)
+
 static struct gpiod_lookup_table i2c_recovery_gpiod_table = {
-	.dev_id = "i2c_davinci",
+	.dev_id = "i2c_davinci.1",
 	.table = {
-		GPIO_LOOKUP("davinci_gpio", 15, "sda",
+		GPIO_LOOKUP("davinci_gpio", DM355_I2C_SDA_PIN, "sda",
 			    GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP("davinci_gpio", 14, "scl",
+		GPIO_LOOKUP("davinci_gpio", DM355_I2C_SCL_PIN, "scl",
 			    GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+		{ }
 	},
 };
 
@@ -179,11 +182,16 @@ static struct resource dm355evm_dm9000_rsrc[] = {
 	},
 };
 
+static struct dm9000_plat_data dm335evm_dm9000_platdata;
+
 static struct platform_device dm355evm_dm9000 = {
 	.name		= "dm9000",
 	.id		= -1,
 	.resource	= dm355evm_dm9000_rsrc,
 	.num_resources	= ARRAY_SIZE(dm355evm_dm9000_rsrc),
+	.dev		= {
+		.platform_data = &dm335evm_dm9000_platdata,
+	},
 };
 
 static struct tvp514x_platform_data tvp5146_pdata = {
@@ -368,7 +376,7 @@ static struct spi_eeprom at25640a = {
 	.flags		= EE_ADDR2,
 };
 
-static struct spi_board_info dm355_evm_spi_info[] __initconst = {
+static const struct spi_board_info dm355_evm_spi_info[] __initconst = {
 	{
 		.modalias	= "at25",
 		.platform_data	= &at25640a,
@@ -383,6 +391,8 @@ static __init void dm355_evm_init(void)
 {
 	struct clk *aemif;
 	int ret;
+
+	dm355_register_clocks();
 
 	ret = dm355_gpio_register();
 	if (ret)
@@ -426,10 +436,9 @@ static __init void dm355_evm_init(void)
 MACHINE_START(DAVINCI_DM355_EVM, "DaVinci DM355 EVM")
 	.atag_offset  = 0x100,
 	.map_io	      = dm355_evm_map_io,
-	.init_irq     = davinci_irq_init,
-	.init_time	= davinci_timer_init,
+	.init_irq     = dm355_init_irq,
+	.init_time	= dm355_init_time,
 	.init_machine = dm355_evm_init,
 	.init_late	= davinci_init_late,
 	.dma_zone_size	= SZ_128M,
-	.restart	= davinci_restart,
 MACHINE_END

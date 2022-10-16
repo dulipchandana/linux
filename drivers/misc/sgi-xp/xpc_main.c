@@ -3,6 +3,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
+ * (C) Copyright 2020 Hewlett Packard Enterprise Development LP
  * Copyright (c) 2004-2009 Silicon Graphics, Inc.  All Rights Reserved.
  */
 
@@ -59,16 +60,16 @@
 
 /* define two XPC debug device structures to be used with dev_dbg() et al */
 
-struct device_driver xpc_dbg_name = {
+static struct device_driver xpc_dbg_name = {
 	.name = "xpc"
 };
 
-struct device xpc_part_dbg_subname = {
+static struct device xpc_part_dbg_subname = {
 	.init_name = "",	/* set to "part" at xpc_init() time */
 	.driver = &xpc_dbg_name
 };
 
-struct device xpc_chan_dbg_subname = {
+static struct device xpc_chan_dbg_subname = {
 	.init_name = "",	/* set to "chan" at xpc_init() time */
 	.driver = &xpc_dbg_name
 };
@@ -178,7 +179,7 @@ xpc_timeout_partition_disengage(struct timer_list *t)
 
 	DBUG_ON(time_is_after_jiffies(part->disengage_timeout));
 
-	(void)xpc_partition_disengaged(part);
+	xpc_partition_disengaged_from_timer(part);
 
 	DBUG_ON(part->disengage_timeout != 0);
 	DBUG_ON(xpc_arch_ops.partition_engaged(XPC_PARTID(part)));
@@ -206,7 +207,7 @@ xpc_start_hb_beater(void)
 {
 	xpc_arch_ops.heartbeat_init();
 	timer_setup(&xpc_hb_timer, xpc_hb_beater, 0);
-	xpc_hb_beater(0);
+	xpc_hb_beater(NULL);
 }
 
 static void
@@ -279,13 +280,6 @@ xpc_hb_checker(void *ignore)
 
 			dev_dbg(xpc_part, "checking remote heartbeats\n");
 			xpc_check_remote_hb();
-
-			/*
-			 * On sn2 we need to periodically recheck to ensure no
-			 * IRQ/amo pairs have been missed.
-			 */
-			if (is_shub())
-				force_IRQ = 1;
 		}
 
 		/* check for outstanding IRQs */
@@ -416,7 +410,8 @@ xpc_setup_ch_structures(struct xpc_partition *part)
 	 * memory.
 	 */
 	DBUG_ON(part->channels != NULL);
-	part->channels = kzalloc(sizeof(struct xpc_channel) * XPC_MAX_NCHANNELS,
+	part->channels = kcalloc(XPC_MAX_NCHANNELS,
+				 sizeof(struct xpc_channel),
 				 GFP_KERNEL);
 	if (part->channels == NULL) {
 		dev_err(xpc_chan, "can't get memory for channels\n");
@@ -905,8 +900,9 @@ xpc_setup_partitions(void)
 	short partid;
 	struct xpc_partition *part;
 
-	xpc_partitions = kzalloc(sizeof(struct xpc_partition) *
-				 xp_max_npartitions, GFP_KERNEL);
+	xpc_partitions = kcalloc(xp_max_npartitions,
+				 sizeof(struct xpc_partition),
+				 GFP_KERNEL);
 	if (xpc_partitions == NULL) {
 		dev_err(xpc_part, "can't get memory for partition structure\n");
 		return -ENOMEM;
@@ -1048,9 +1044,7 @@ xpc_do_exit(enum xp_retval reason)
 
 	xpc_teardown_partitions();
 
-	if (is_shub())
-		xpc_exit_sn2();
-	else if (is_uv())
+	if (is_uv_system())
 		xpc_exit_uv();
 }
 
@@ -1180,7 +1174,7 @@ xpc_system_die(struct notifier_block *nb, unsigned long event, void *_die_args)
 		if (!xpc_kdebug_ignore)
 			break;
 
-		/* fall through */
+		fallthrough;
 	case DIE_MCA_MONARCH_ENTER:
 	case DIE_INIT_MONARCH_ENTER:
 		xpc_arch_ops.offline_heartbeat();
@@ -1191,7 +1185,7 @@ xpc_system_die(struct notifier_block *nb, unsigned long event, void *_die_args)
 		if (!xpc_kdebug_ignore)
 			break;
 
-		/* fall through */
+		fallthrough;
 	case DIE_MCA_MONARCH_LEAVE:
 	case DIE_INIT_MONARCH_LEAVE:
 		xpc_arch_ops.online_heartbeat();
@@ -1224,7 +1218,7 @@ xpc_system_die(struct notifier_block *nb, unsigned long event, void *_die_args)
 	return NOTIFY_DONE;
 }
 
-int __init
+static int __init
 xpc_init(void)
 {
 	int ret;
@@ -1233,21 +1227,7 @@ xpc_init(void)
 	dev_set_name(xpc_part, "part");
 	dev_set_name(xpc_chan, "chan");
 
-	if (is_shub()) {
-		/*
-		 * The ia64-sn2 architecture supports at most 64 partitions.
-		 * And the inability to unregister remote amos restricts us
-		 * further to only support exactly 64 partitions on this
-		 * architecture, no less.
-		 */
-		if (xp_max_npartitions != 64) {
-			dev_err(xpc_part, "max #of partitions not set to 64\n");
-			ret = -EINVAL;
-		} else {
-			ret = xpc_init_sn2();
-		}
-
-	} else if (is_uv()) {
+	if (is_uv_system()) {
 		ret = xpc_init_uv();
 
 	} else {
@@ -1333,16 +1313,14 @@ out_2:
 
 	xpc_teardown_partitions();
 out_1:
-	if (is_shub())
-		xpc_exit_sn2();
-	else if (is_uv())
+	if (is_uv_system())
 		xpc_exit_uv();
 	return ret;
 }
 
 module_init(xpc_init);
 
-void __exit
+static void __exit
 xpc_exit(void)
 {
 	xpc_do_exit(xpUnloading);

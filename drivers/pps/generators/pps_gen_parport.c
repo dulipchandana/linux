@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * pps_gen_parport.c -- kernel parallel port PPS signal generator
  *
- *
  * Copyright (C) 2009   Alexander Gordeev <lasaine@lvk.cs.msu.su>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 
@@ -33,8 +19,6 @@
 #include <linux/time.h>
 #include <linux/hrtimer.h>
 #include <linux/parport.h>
-
-#define DRVDESC "parallel port PPS signal generator"
 
 #define SIGNAL		0
 #define NO_SIGNAL	PARPORT_CONTROL_STROBE
@@ -192,13 +176,23 @@ static inline ktime_t next_intr_time(struct pps_generator_pp *dev)
 
 static void parport_attach(struct parport *port)
 {
+	struct pardev_cb pps_cb;
+
+	if (send_delay > SEND_DELAY_MAX) {
+		pr_err("delay value should be not greater then %d\n", SEND_DELAY_MAX);
+		return;
+	}
+
 	if (attached) {
 		/* we already have a port */
 		return;
 	}
 
-	device.pardev = parport_register_device(port, KBUILD_MODNAME,
-			NULL, NULL, NULL, PARPORT_FLAG_EXCL, &device);
+	memset(&pps_cb, 0, sizeof(pps_cb));
+	pps_cb.private = &device;
+	pps_cb.flags = PARPORT_FLAG_EXCL;
+	device.pardev = parport_register_dev_model(port, KBUILD_MODNAME,
+						   &pps_cb, 0);
 	if (!device.pardev) {
 		pr_err("couldn't register with %s\n", port->name);
 		return;
@@ -236,42 +230,12 @@ static void parport_detach(struct parport *port)
 
 static struct parport_driver pps_gen_parport_driver = {
 	.name = KBUILD_MODNAME,
-	.attach = parport_attach,
+	.match_port = parport_attach,
 	.detach = parport_detach,
+	.devmodel = true,
 };
-
-/* module staff */
-
-static int __init pps_gen_parport_init(void)
-{
-	int ret;
-
-	pr_info(DRVDESC "\n");
-
-	if (send_delay > SEND_DELAY_MAX) {
-		pr_err("delay value should be not greater"
-				" then %d\n", SEND_DELAY_MAX);
-		return -EINVAL;
-	}
-
-	ret = parport_register_driver(&pps_gen_parport_driver);
-	if (ret) {
-		pr_err("unable to register with parport\n");
-		return ret;
-	}
-
-	return  0;
-}
-
-static void __exit pps_gen_parport_exit(void)
-{
-	parport_unregister_driver(&pps_gen_parport_driver);
-	pr_info("hrtimer avg error is %ldns\n", hrtimer_error);
-}
-
-module_init(pps_gen_parport_init);
-module_exit(pps_gen_parport_exit);
+module_parport_driver(pps_gen_parport_driver);
 
 MODULE_AUTHOR("Alexander Gordeev <lasaine@lvk.cs.msu.su>");
-MODULE_DESCRIPTION(DRVDESC);
+MODULE_DESCRIPTION("parallel port PPS signal generator");
 MODULE_LICENSE("GPL");

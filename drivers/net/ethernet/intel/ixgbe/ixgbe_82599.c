@@ -1,30 +1,5 @@
-/*******************************************************************************
-
-  Intel 10 Gigabit PCI Express Linux driver
-  Copyright(c) 1999 - 2016 Intel Corporation.
-
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
-
-  Contact Information:
-  Linux NICS <linux.nics@intel.com>
-  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
-  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
-
-*******************************************************************************/
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright(c) 1999 - 2018 Intel Corporation. */
 
 #include <linux/pci.h>
 #include <linux/delay.h>
@@ -1073,7 +1048,7 @@ mac_reset_top:
 	 * clear the multicast table.  Also reset num_rar_entries to 128,
 	 * since we modify this value when programming the SAN MAC address.
 	 */
-	hw->mac.num_rar_entries = 128;
+	hw->mac.num_rar_entries = IXGBE_82599_RAR_ENTRIES;
 	hw->mac.ops.init_rx_addrs(hw);
 
 	/* Store the permanent SAN mac address */
@@ -1376,7 +1351,7 @@ static u32 ixgbe_atr_compute_sig_hash_82599(union ixgbe_atr_hash_dword input,
 }
 
 /**
- *  ixgbe_atr_add_signature_filter_82599 - Adds a signature hash filter
+ *  ixgbe_fdir_add_signature_filter_82599 - Adds a signature hash filter
  *  @hw: pointer to hardware structure
  *  @input: unique input dword
  *  @common: compressed common input dword
@@ -1461,7 +1436,8 @@ void ixgbe_atr_compute_perfect_hash_82599(union ixgbe_atr_input *input,
 {
 
 	u32 hi_hash_dword, lo_hash_dword, flow_vm_vlan;
-	u32 bucket_hash = 0, hi_dword = 0;
+	u32 bucket_hash = 0;
+	__be32 hi_dword = 0;
 	int i;
 
 	/* Apply masks to input data */
@@ -1500,7 +1476,7 @@ void ixgbe_atr_compute_perfect_hash_82599(union ixgbe_atr_input *input,
 	 * Limit hash to 13 bits since max bucket count is 8K.
 	 * Store result at the end of the input stream.
 	 */
-	input->formatted.bkt_hash = bucket_hash & 0x1FFF;
+	input->formatted.bkt_hash = (__force __be16)(bucket_hash & 0x1FFF);
 }
 
 /**
@@ -1538,8 +1514,7 @@ static u32 ixgbe_get_fdirtcpm_82599(union ixgbe_atr_input *input_mask)
 #define IXGBE_WRITE_REG_BE32(a, reg, value) \
 	IXGBE_WRITE_REG((a), (reg), IXGBE_STORE_AS_BE32(ntohl(value)))
 
-#define IXGBE_STORE_AS_BE16(_value) \
-	ntohs(((u16)(_value) >> 8) | ((u16)(_value) << 8))
+#define IXGBE_STORE_AS_BE16(_value) __swab16(ntohs((_value)))
 
 s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 				    union ixgbe_atr_input *input_mask)
@@ -1566,6 +1541,7 @@ s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 	switch (input_mask->formatted.vm_pool & 0x7F) {
 	case 0x0:
 		fdirm |= IXGBE_FDIRM_POOL;
+		break;
 	case 0x7F:
 		break;
 	default:
@@ -1581,6 +1557,7 @@ s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 			hw_dbg(hw, " Error on src/dst port mask\n");
 			return IXGBE_ERR_CONFIG;
 		}
+		break;
 	case IXGBE_ATR_L4TYPE_MASK:
 		break;
 	default:
@@ -1592,7 +1569,7 @@ s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 	case 0x0000:
 		/* mask VLAN ID */
 		fdirm |= IXGBE_FDIRM_VLANID;
-		/* fall through */
+		fallthrough;
 	case 0x0FFF:
 		/* mask VLAN priority */
 		fdirm |= IXGBE_FDIRM_VLANP;
@@ -1600,7 +1577,7 @@ s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 	case 0xE000:
 		/* mask VLAN ID only */
 		fdirm |= IXGBE_FDIRM_VLANID;
-		/* fall through */
+		fallthrough;
 	case 0xEFFF:
 		/* no VLAN fields masked */
 		break;
@@ -1609,11 +1586,11 @@ s32 ixgbe_fdir_set_input_mask_82599(struct ixgbe_hw *hw,
 		return IXGBE_ERR_CONFIG;
 	}
 
-	switch (input_mask->formatted.flex_bytes & 0xFFFF) {
+	switch ((__force u16)input_mask->formatted.flex_bytes & 0xFFFF) {
 	case 0x0000:
 		/* Mask Flex Bytes */
 		fdirm |= IXGBE_FDIRM_FLEX;
-		/* fall through */
+		fallthrough;
 	case 0xFFFF:
 		break;
 	default:
@@ -1673,9 +1650,9 @@ s32 ixgbe_fdir_write_perfect_filter_82599(struct ixgbe_hw *hw,
 	IXGBE_WRITE_REG_BE32(hw, IXGBE_FDIRIPDA, input->formatted.dst_ip[0]);
 
 	/* record source and destination port (little-endian)*/
-	fdirport = ntohs(input->formatted.dst_port);
+	fdirport = be16_to_cpu(input->formatted.dst_port);
 	fdirport <<= IXGBE_FDIRPORT_DESTINATION_SHIFT;
-	fdirport |= ntohs(input->formatted.src_port);
+	fdirport |= be16_to_cpu(input->formatted.src_port);
 	IXGBE_WRITE_REG(hw, IXGBE_FDIRPORT, fdirport);
 
 	/* record vlan (little-endian) and flex_bytes(big-endian) */
@@ -1685,7 +1662,7 @@ s32 ixgbe_fdir_write_perfect_filter_82599(struct ixgbe_hw *hw,
 	IXGBE_WRITE_REG(hw, IXGBE_FDIRVLAN, fdirvlan);
 
 	/* configure FDIRHASH register */
-	fdirhash = input->formatted.bkt_hash;
+	fdirhash = (__force u32)input->formatted.bkt_hash;
 	fdirhash |= soft_id << IXGBE_FDIRHASH_SIG_SW_INDEX_SHIFT;
 	IXGBE_WRITE_REG(hw, IXGBE_FDIRHASH, fdirhash);
 
@@ -1723,7 +1700,7 @@ s32 ixgbe_fdir_erase_perfect_filter_82599(struct ixgbe_hw *hw,
 	s32 err;
 
 	/* configure FDIRHASH register */
-	fdirhash = input->formatted.bkt_hash;
+	fdirhash = (__force u32)input->formatted.bkt_hash;
 	fdirhash |= soft_id << IXGBE_FDIRHASH_SIG_SW_INDEX_SHIFT;
 	IXGBE_WRITE_REG(hw, IXGBE_FDIRHASH, fdirhash);
 

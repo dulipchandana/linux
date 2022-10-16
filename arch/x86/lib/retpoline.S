@@ -4,19 +4,39 @@
 #include <linux/linkage.h>
 #include <asm/dwarf2.h>
 #include <asm/cpufeatures.h>
-#include <asm/alternative-asm.h>
+#include <asm/alternative.h>
 #include <asm/export.h>
 #include <asm/nospec-branch.h>
-#include <asm/bitsperlong.h>
+#include <asm/unwind_hints.h>
+#include <asm/frame.h>
 
-.macro THUNK reg
 	.section .text.__x86.indirect_thunk
 
-ENTRY(__x86_indirect_thunk_\reg)
-	CFI_STARTPROC
-	JMP_NOSPEC %\reg
-	CFI_ENDPROC
-ENDPROC(__x86_indirect_thunk_\reg)
+.macro RETPOLINE reg
+	ANNOTATE_INTRA_FUNCTION_CALL
+	call    .Ldo_rop_\@
+.Lspec_trap_\@:
+	UNWIND_HINT_EMPTY
+	pause
+	lfence
+	jmp .Lspec_trap_\@
+.Ldo_rop_\@:
+	mov     %\reg, (%_ASM_SP)
+	UNWIND_HINT_FUNC
+	RET
+.endm
+
+.macro THUNK reg
+
+	.align RETPOLINE_THUNK_SIZE
+SYM_INNER_LABEL(__x86_indirect_thunk_\reg, SYM_L_GLOBAL)
+	UNWIND_HINT_EMPTY
+	ANNOTATE_NOENDBR
+
+	ALTERNATIVE_2 __stringify(RETPOLINE \reg), \
+		      __stringify(lfence; ANNOTATE_RETPOLINE_SAFE; jmp *%\reg; int3), X86_FEATURE_RETPOLINE_LFENCE, \
+		      __stringify(ANNOTATE_RETPOLINE_SAFE; jmp *%\reg), ALT_NOT(X86_FEATURE_RETPOLINE)
+
 .endm
 
 /*
@@ -25,80 +45,98 @@ ENDPROC(__x86_indirect_thunk_\reg)
  * only see one instance of "__x86_indirect_thunk_\reg" rather
  * than one per register with the correct names. So we do it
  * the simple and nasty way...
+ *
+ * Worse, you can only have a single EXPORT_SYMBOL per line,
+ * and CPP can't insert newlines, so we have to repeat everything
+ * at least twice.
  */
-#define __EXPORT_THUNK(sym) _ASM_NOKPROBE(sym); EXPORT_SYMBOL(sym)
-#define EXPORT_THUNK(reg) __EXPORT_THUNK(__x86_indirect_thunk_ ## reg)
-#define GENERATE_THUNK(reg) THUNK reg ; EXPORT_THUNK(reg)
 
-GENERATE_THUNK(_ASM_AX)
-GENERATE_THUNK(_ASM_BX)
-GENERATE_THUNK(_ASM_CX)
-GENERATE_THUNK(_ASM_DX)
-GENERATE_THUNK(_ASM_SI)
-GENERATE_THUNK(_ASM_DI)
-GENERATE_THUNK(_ASM_BP)
-#ifdef CONFIG_64BIT
-GENERATE_THUNK(r8)
-GENERATE_THUNK(r9)
-GENERATE_THUNK(r10)
-GENERATE_THUNK(r11)
-GENERATE_THUNK(r12)
-GENERATE_THUNK(r13)
-GENERATE_THUNK(r14)
-GENERATE_THUNK(r15)
-#endif
+#define __EXPORT_THUNK(sym)	_ASM_NOKPROBE(sym); EXPORT_SYMBOL(sym)
+#define EXPORT_THUNK(reg)	__EXPORT_THUNK(__x86_indirect_thunk_ ## reg)
+
+	.align RETPOLINE_THUNK_SIZE
+SYM_CODE_START(__x86_indirect_thunk_array)
+
+#define GEN(reg) THUNK reg
+#include <asm/GEN-for-each-reg.h>
+#undef GEN
+
+	.align RETPOLINE_THUNK_SIZE
+SYM_CODE_END(__x86_indirect_thunk_array)
+
+#define GEN(reg) EXPORT_THUNK(reg)
+#include <asm/GEN-for-each-reg.h>
+#undef GEN
 
 /*
- * Fill the CPU return stack buffer.
- *
- * Each entry in the RSB, if used for a speculative 'ret', contains an
- * infinite 'pause; lfence; jmp' loop to capture speculative execution.
- *
- * This is required in various cases for retpoline and IBRS-based
- * mitigations for the Spectre variant 2 vulnerability. Sometimes to
- * eliminate potentially bogus entries from the RSB, and sometimes
- * purely to ensure that it doesn't get empty, which on some CPUs would
- * allow predictions from other (unwanted!) sources to be used.
- *
- * Google experimented with loop-unrolling and this turned out to be
- * the optimal version - two calls, each with their own speculation
- * trap should their return address end up getting used, in a loop.
+ * This function name is magical and is used by -mfunction-return=thunk-extern
+ * for the compiler to generate JMPs to it.
  */
-.macro STUFF_RSB nr:req sp:req
-	mov	$(\nr / 2), %_ASM_BX
-	.align 16
-771:
-	call	772f
-773:						/* speculation trap */
-	pause
-	lfence
-	jmp	773b
-	.align 16
-772:
-	call	774f
-775:						/* speculation trap */
-	pause
-	lfence
-	jmp	775b
-	.align 16
-774:
-	dec	%_ASM_BX
-	jnz	771b
-	add	$((BITS_PER_LONG/8) * \nr), \sp
-.endm
+#ifdef CONFIG_RETHUNK
 
-#define RSB_FILL_LOOPS		16	/* To avoid underflow */
+	.section .text.__x86.return_thunk
 
-ENTRY(__fill_rsb)
-	STUFF_RSB RSB_FILL_LOOPS, %_ASM_SP
+/*
+ * Safety details here pertain to the AMD Zen{1,2} microarchitecture:
+ * 1) The RET at __x86_return_thunk must be on a 64 byte boundary, for
+ *    alignment within the BTB.
+ * 2) The instruction at zen_untrain_ret must contain, and not
+ *    end with, the 0xc3 byte of the RET.
+ * 3) STIBP must be enabled, or SMT disabled, to prevent the sibling thread
+ *    from re-poisioning the BTB prediction.
+ */
+	.align 64
+	.skip 63, 0xcc
+SYM_FUNC_START_NOALIGN(zen_untrain_ret);
+
+	/*
+	 * As executed from zen_untrain_ret, this is:
+	 *
+	 *   TEST $0xcc, %bl
+	 *   LFENCE
+	 *   JMP __x86_return_thunk
+	 *
+	 * Executing the TEST instruction has a side effect of evicting any BTB
+	 * prediction (potentially attacker controlled) attached to the RET, as
+	 * __x86_return_thunk + 1 isn't an instruction boundary at the moment.
+	 */
+	.byte	0xf6
+
+	/*
+	 * As executed from __x86_return_thunk, this is a plain RET.
+	 *
+	 * As part of the TEST above, RET is the ModRM byte, and INT3 the imm8.
+	 *
+	 * We subsequently jump backwards and architecturally execute the RET.
+	 * This creates a correct BTB prediction (type=ret), but in the
+	 * meantime we suffer Straight Line Speculation (because the type was
+	 * no branch) which is halted by the INT3.
+	 *
+	 * With SMT enabled and STIBP active, a sibling thread cannot poison
+	 * RET's prediction to a type of its choice, but can evict the
+	 * prediction due to competitive sharing. If the prediction is
+	 * evicted, __x86_return_thunk will suffer Straight Line Speculation
+	 * which will be contained safely by the INT3.
+	 */
+SYM_INNER_LABEL(__x86_return_thunk, SYM_L_GLOBAL)
 	ret
-END(__fill_rsb)
-EXPORT_SYMBOL_GPL(__fill_rsb)
+	int3
+SYM_CODE_END(__x86_return_thunk)
 
-#define RSB_CLEAR_LOOPS		32	/* To forcibly overwrite all entries */
+	/*
+	 * Ensure the TEST decoding / BTB invalidation is complete.
+	 */
+	lfence
 
-ENTRY(__clear_rsb)
-	STUFF_RSB RSB_CLEAR_LOOPS, %_ASM_SP
-	ret
-END(__clear_rsb)
-EXPORT_SYMBOL_GPL(__clear_rsb)
+	/*
+	 * Jump back and execute the RET in the middle of the TEST instruction.
+	 * INT3 is for SLS protection.
+	 */
+	jmp __x86_return_thunk
+	int3
+SYM_FUNC_END(zen_untrain_ret)
+__EXPORT_THUNK(zen_untrain_ret)
+
+EXPORT_SYMBOL(__x86_return_thunk)
+
+#endif /* CONFIG_RETHUNK */

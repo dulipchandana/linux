@@ -3,8 +3,6 @@
  * Copyright (c) 1996, 2003 VIA Networking Technologies, Inc.
  * All rights reserved.
  *
- * File: dpc.c
- *
  * Purpose: handle dpc rx functions
  *
  * Author: Lyndon Chen
@@ -34,7 +32,7 @@ static bool vnt_rx_data(struct vnt_private *priv, struct sk_buff *skb,
 	__le64 *tsf_time;
 	u16 frame_size;
 	int ii, r;
-	u8 *rx_sts, *rx_rate, *sq;
+	u8 *rx_rate;
 	u8 *skb_data;
 	u8 rate_idx = 0;
 	u8 rate[MAX_RATE] = {2, 4, 11, 22, 12, 18, 24, 36, 48, 72, 96, 108};
@@ -49,7 +47,6 @@ static bool vnt_rx_data(struct vnt_private *priv, struct sk_buff *skb,
 
 	skb_data = (u8 *)skb->data;
 
-	rx_sts = skb_data;
 	rx_rate = skb_data + 1;
 
 	sband = hw->wiphy->bands[hw->conf.chandef.chan->band];
@@ -74,7 +71,6 @@ static bool vnt_rx_data(struct vnt_private *priv, struct sk_buff *skb,
 	}
 
 	tsf_time = (__le64 *)(skb_data + bytes_received - 12);
-	sq = skb_data + bytes_received - 4;
 	new_rsr = skb_data + bytes_received - 3;
 	rssi = skb_data + bytes_received - 2;
 	rsr = skb_data + bytes_received - 1;
@@ -84,7 +80,7 @@ static bool vnt_rx_data(struct vnt_private *priv, struct sk_buff *skb,
 	RFvRSSITodBm(priv, *rssi, &rx_dbm);
 
 	priv->byBBPreEDRSSI = (u8)rx_dbm + 1;
-	priv->uCurrRSSI = *rssi;
+	priv->current_rssi = *rssi;
 
 	skb_pull(skb, 4);
 	skb_trim(skb, frame_size);
@@ -104,7 +100,7 @@ static bool vnt_rx_data(struct vnt_private *priv, struct sk_buff *skb,
 	rx_status.rate_idx = rate_idx;
 
 	if (ieee80211_has_protected(fc)) {
-		if (priv->byLocalID > REV_ID_VT3253_A1)
+		if (priv->local_id > REV_ID_VT3253_A1)
 			rx_status.flag |= RX_FLAG_DECRYPTED;
 
 		/* Drop packet */

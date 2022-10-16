@@ -215,25 +215,25 @@ static void siox_poll(struct siox_master *smaster)
 			siox_status_clean(status,
 					  sdevice->status_written_lastcycle);
 
-		/* Check counter bits */
-		if (siox_device_counter_error(sdevice, status_clean)) {
-			bool prev_counter_error;
+		/* Check counter and type bits */
+		if (siox_device_counter_error(sdevice, status_clean) ||
+		    siox_device_type_error(sdevice, status_clean)) {
+			bool prev_error;
 
 			synced = false;
 
 			/* only report a new error if the last cycle was ok */
-			prev_counter_error =
+			prev_error =
 				siox_device_counter_error(sdevice,
-							  prev_status_clean);
-			if (!prev_counter_error) {
+							  prev_status_clean) ||
+				siox_device_type_error(sdevice,
+						       prev_status_clean);
+
+			if (!prev_error) {
 				sdevice->status_errors++;
 				sysfs_notify_dirent(sdevice->status_errors_kn);
 			}
 		}
-
-		/* Check type bits */
-		if (siox_device_type_error(sdevice, status_clean))
-			synced = false;
 
 		/* If the device is unsynced report the watchdog as active */
 		if (!synced) {
@@ -512,40 +512,44 @@ static int siox_match(struct device *dev, struct device_driver *drv)
 	return 1;
 }
 
-static struct bus_type siox_bus_type = {
-	.name = "siox",
-	.match = siox_match,
-};
-
-static int siox_driver_probe(struct device *dev)
+static int siox_probe(struct device *dev)
 {
 	struct siox_driver *sdriver = to_siox_driver(dev->driver);
 	struct siox_device *sdevice = to_siox_device(dev);
-	int ret;
 
-	ret = sdriver->probe(sdevice);
-	return ret;
+	return sdriver->probe(sdevice);
 }
 
-static int siox_driver_remove(struct device *dev)
-{
-	struct siox_driver *sdriver =
-		container_of(dev->driver, struct siox_driver, driver);
-	struct siox_device *sdevice = to_siox_device(dev);
-	int ret;
-
-	ret = sdriver->remove(sdevice);
-	return ret;
-}
-
-static void siox_driver_shutdown(struct device *dev)
+static void siox_remove(struct device *dev)
 {
 	struct siox_driver *sdriver =
 		container_of(dev->driver, struct siox_driver, driver);
 	struct siox_device *sdevice = to_siox_device(dev);
 
-	sdriver->shutdown(sdevice);
+	if (sdriver->remove)
+		sdriver->remove(sdevice);
 }
+
+static void siox_shutdown(struct device *dev)
+{
+	struct siox_device *sdevice = to_siox_device(dev);
+	struct siox_driver *sdriver;
+
+	if (!dev->driver)
+		return;
+
+	sdriver = container_of(dev->driver, struct siox_driver, driver);
+	if (sdriver->shutdown)
+		sdriver->shutdown(sdevice);
+}
+
+static struct bus_type siox_bus_type = {
+	.name = "siox",
+	.match = siox_match,
+	.probe = siox_probe,
+	.remove = siox_remove,
+	.shutdown = siox_shutdown,
+};
 
 static ssize_t active_show(struct device *dev,
 			   struct device_attribute *attr, char *buf)
@@ -594,7 +598,7 @@ static ssize_t device_add_store(struct device *dev,
 	size_t inbytes = 0, outbytes = 0;
 	u8 statustype = 0;
 
-	ret = sscanf(buf, "%20s %zu %zu %hhu", type, &inbytes,
+	ret = sscanf(buf, "%19s %zu %zu %hhu", type, &inbytes,
 		     &outbytes, &statustype);
 	if (ret != 3 && ret != 4)
 		return -EINVAL;
@@ -715,16 +719,16 @@ int siox_master_register(struct siox_master *smaster)
 
 	dev_set_name(&smaster->dev, "siox-%d", smaster->busno);
 
+	mutex_init(&smaster->lock);
+	INIT_LIST_HEAD(&smaster->devices);
+
 	smaster->last_poll = jiffies;
-	smaster->poll_thread = kthread_create(siox_poll_thread, smaster,
-					      "siox-%d", smaster->busno);
+	smaster->poll_thread = kthread_run(siox_poll_thread, smaster,
+					   "siox-%d", smaster->busno);
 	if (IS_ERR(smaster->poll_thread)) {
 		smaster->active = 0;
 		return PTR_ERR(smaster->poll_thread);
 	}
-
-	mutex_init(&smaster->lock);
-	INIT_LIST_HEAD(&smaster->devices);
 
 	ret = device_add(&smaster->dev);
 	if (ret)
@@ -882,7 +886,8 @@ int __siox_driver_register(struct siox_driver *sdriver, struct module *owner)
 	if (unlikely(!siox_is_registered))
 		return -EPROBE_DEFER;
 
-	if (!sdriver->set_data && !sdriver->get_data) {
+	if (!sdriver->probe ||
+	    (!sdriver->set_data && !sdriver->get_data)) {
 		pr_err("Driver %s doesn't provide needed callbacks\n",
 		       sdriver->driver.name);
 		return -EINVAL;
@@ -890,13 +895,6 @@ int __siox_driver_register(struct siox_driver *sdriver, struct module *owner)
 
 	sdriver->driver.owner = owner;
 	sdriver->driver.bus = &siox_bus_type;
-
-	if (sdriver->probe)
-		sdriver->driver.probe = siox_driver_probe;
-	if (sdriver->remove)
-		sdriver->driver.remove = siox_driver_remove;
-	if (sdriver->shutdown)
-		sdriver->driver.shutdown = siox_driver_shutdown;
 
 	ret = driver_register(&sdriver->driver);
 	if (ret)

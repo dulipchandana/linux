@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* ir-sharp-decoder.c - handle Sharp IR Pulse/Space protocol
  *
  * Copyright (C) 2013-2014 Imagination Technologies Ltd.
  *
  * Based on NEC decoder:
  * Copyright (C) 2010 by Mauro Carvalho Chehab
- *
- * This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
 
 #include <linux/bitrev.h>
@@ -20,7 +12,7 @@
 #include "rc-core-priv.h"
 
 #define SHARP_NBITS		15
-#define SHARP_UNIT		40000  /* ns */
+#define SHARP_UNIT		40  /* us */
 #define SHARP_BIT_PULSE		(8    * SHARP_UNIT) /* 320us */
 #define SHARP_BIT_0_PERIOD	(25   * SHARP_UNIT) /* 1ms (680us space) */
 #define SHARP_BIT_1_PERIOD	(50   * SHARP_UNIT) /* 2ms (1680ms space) */
@@ -49,13 +41,13 @@ static int ir_sharp_decode(struct rc_dev *dev, struct ir_raw_event ev)
 	u32 msg, echo, address, command, scancode;
 
 	if (!is_timing_event(ev)) {
-		if (ev.reset)
+		if (ev.overflow)
 			data->state = STATE_INACTIVE;
 		return 0;
 	}
 
-	IR_dprintk(2, "Sharp decode started at state %d (%uus %s)\n",
-		   data->state, TO_US(ev.duration), TO_STR(ev.pulse));
+	dev_dbg(&dev->dev, "Sharp decode started at state %d (%uus %s)\n",
+		data->state, ev.duration, TO_STR(ev.pulse));
 
 	switch (data->state) {
 
@@ -149,9 +141,9 @@ static int ir_sharp_decode(struct rc_dev *dev, struct ir_raw_event ev)
 		msg = (data->bits >> 15) & 0x7fff;
 		echo = data->bits & 0x7fff;
 		if ((msg ^ echo) != 0x3ff) {
-			IR_dprintk(1,
-				   "Sharp checksum error: received 0x%04x, 0x%04x\n",
-				   msg, echo);
+			dev_dbg(&dev->dev,
+				"Sharp checksum error: received 0x%04x, 0x%04x\n",
+				msg, echo);
 			break;
 		}
 
@@ -159,16 +151,15 @@ static int ir_sharp_decode(struct rc_dev *dev, struct ir_raw_event ev)
 		command = bitrev8((msg >> 2) & 0xff);
 
 		scancode = address << 8 | command;
-		IR_dprintk(1, "Sharp scancode 0x%04x\n", scancode);
+		dev_dbg(&dev->dev, "Sharp scancode 0x%04x\n", scancode);
 
 		rc_keydown(dev, RC_PROTO_SHARP, scancode, 0);
 		data->state = STATE_INACTIVE;
 		return 0;
 	}
 
-	IR_dprintk(1, "Sharp decode failed at count %d state %d (%uus %s)\n",
-		   data->count, data->state, TO_US(ev.duration),
-		   TO_STR(ev.pulse));
+	dev_dbg(&dev->dev, "Sharp decode failed at count %d state %d (%uus %s)\n",
+		data->count, data->state, ev.duration, TO_STR(ev.pulse));
 	data->state = STATE_INACTIVE;
 	return -EINVAL;
 }
@@ -227,6 +218,7 @@ static struct ir_raw_handler sharp_handler = {
 	.decode		= ir_sharp_decode,
 	.encode		= ir_sharp_encode,
 	.carrier	= 38000,
+	.min_timeout	= SHARP_ECHO_SPACE + SHARP_ECHO_SPACE / 4,
 };
 
 static int __init ir_sharp_decode_init(void)

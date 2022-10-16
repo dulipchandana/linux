@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1)
-/* prism2mgmt.h
+/* SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1) */
+/*
  *
  * Declares the mgmt command handler functions
  *

@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* ----------------------------------------------------------------------- *
  *
  *   Copyright 2014 Intel Corporation; author: H. Peter Anvin
- *
- *   This program is free software; you can redistribute it and/or modify it
- *   under the terms and conditions of the GNU General Public License,
- *   version 2, as published by the Free Software Foundation.
- *
- *   This program is distributed in the hope it will be useful, but WITHOUT
- *   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- *   more details.
  *
  * ----------------------------------------------------------------------- */
 
@@ -37,7 +29,7 @@
 #include <linux/percpu.h>
 #include <linux/gfp.h>
 #include <linux/random.h>
-#include <asm/pgtable.h>
+#include <linux/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/setup.h>
 #include <asm/espfix.h>
@@ -108,7 +100,7 @@ static void init_espfix_random(void)
 	 * This is run before the entropy pools are initialized,
 	 * but this is hopefully better than nothing.
 	 */
-	if (!arch_get_random_long(&rand)) {
+	if (!arch_get_random_longs(&rand, 1)) {
 		/* The constant is an arbitrary large prime */
 		rand = rdtsc();
 		rand *= 0xc345c6b72fd16123UL;
@@ -195,6 +187,10 @@ void init_espfix_ap(int cpu)
 
 	pte_p = pte_offset_kernel(&pmd, addr);
 	stack_page = page_address(alloc_pages_node(node, GFP_KERNEL, 0));
+	/*
+	 * __PAGE_KERNEL_* includes _PAGE_GLOBAL, which we want since
+	 * this is mapped to userspace.
+	 */
 	pte = __pte(__pa(stack_page) | ((__PAGE_KERNEL_RO | _PAGE_ENC) & ptemask));
 	for (n = 0; n < ESPFIX_PTE_CLONES; n++)
 		set_pte(&pte_p[n*PTE_STRIDE], pte);

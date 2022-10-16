@@ -25,7 +25,7 @@
 
 #include "dce_hwseq.h"
 #include "reg_helper.h"
-#include "hw_sequencer.h"
+#include "hw_sequencer_private.h"
 #include "core_types.h"
 
 #define CTX \
@@ -53,10 +53,11 @@ void dce_pipe_control_lock(struct dc *dc,
 	struct dce_hwseq *hws = dc->hwseq;
 
 	/* Not lock pipe when blank */
-	if (lock && pipe->stream_res.tg->funcs->is_blanked(pipe->stream_res.tg))
+	if (lock && pipe->stream_res.tg->funcs->is_blanked &&
+	    pipe->stream_res.tg->funcs->is_blanked(pipe->stream_res.tg))
 		return;
 
-	val = REG_GET_4(BLND_V_UPDATE_LOCK[pipe->pipe_idx],
+	val = REG_GET_4(BLND_V_UPDATE_LOCK[pipe->stream_res.tg->inst],
 			BLND_DCP_GRPH_V_UPDATE_LOCK, &dcp_grph,
 			BLND_SCL_V_UPDATE_LOCK, &scl,
 			BLND_BLND_V_UPDATE_LOCK, &blnd,
@@ -67,22 +68,31 @@ void dce_pipe_control_lock(struct dc *dc,
 	blnd = lock_val;
 	update_lock_mode = lock_val;
 
-	REG_SET_2(BLND_V_UPDATE_LOCK[pipe->pipe_idx], val,
+	REG_SET_2(BLND_V_UPDATE_LOCK[pipe->stream_res.tg->inst], val,
 			BLND_DCP_GRPH_V_UPDATE_LOCK, dcp_grph,
 			BLND_SCL_V_UPDATE_LOCK, scl);
 
 	if (hws->masks->BLND_BLND_V_UPDATE_LOCK != 0)
-		REG_SET_2(BLND_V_UPDATE_LOCK[pipe->pipe_idx], val,
+		REG_SET_2(BLND_V_UPDATE_LOCK[pipe->stream_res.tg->inst], val,
 				BLND_BLND_V_UPDATE_LOCK, blnd,
 				BLND_V_UPDATE_LOCK_MODE, update_lock_mode);
 
 	if (hws->wa.blnd_crtc_trigger) {
 		if (!lock) {
-			uint32_t value = REG_READ(CRTC_H_BLANK_START_END[pipe->pipe_idx]);
-			REG_WRITE(CRTC_H_BLANK_START_END[pipe->pipe_idx], value);
+			uint32_t value = REG_READ(CRTC_H_BLANK_START_END[pipe->stream_res.tg->inst]);
+			REG_WRITE(CRTC_H_BLANK_START_END[pipe->stream_res.tg->inst], value);
 		}
 	}
 }
+
+#if defined(CONFIG_DRM_AMD_DC_SI)
+void dce60_pipe_control_lock(struct dc *dc,
+		struct pipe_ctx *pipe,
+		bool lock)
+{
+	/* DCE6 has no BLND_V_UPDATE_LOCK register */
+}
+#endif
 
 void dce_set_blender_mode(struct dce_hwseq *hws,
 	unsigned int blnd_inst,
@@ -197,9 +207,9 @@ void dce_crtc_switch_to_clk_src(struct dce_hwseq *hws,
 }
 
 /* Only use LUT for 8 bit formats */
-bool dce_use_lut(const struct dc_plane_state *plane_state)
+bool dce_use_lut(enum surface_pixel_format format)
 {
-	switch (plane_state->format) {
+	switch (format) {
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB8888:
 	case SURFACE_PIXEL_FORMAT_GRPH_ABGR8888:
 		return true;

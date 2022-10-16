@@ -79,20 +79,28 @@ void nmi_trigger_cpumask_backtrace(const cpumask_t *mask,
 	 * Force flush any remote buffers that might be stuck in IRQ context
 	 * and therefore could not run their irq_work.
 	 */
-	printk_safe_flush();
+	printk_trigger_flush();
 
 	clear_bit_unlock(0, &backtrace_flag);
 	put_cpu();
 }
 
+// Dump stacks even for idle CPUs.
+static bool backtrace_idle;
+module_param(backtrace_idle, bool, 0644);
+
 bool nmi_cpu_backtrace(struct pt_regs *regs)
 {
-	static arch_spinlock_t lock = __ARCH_SPIN_LOCK_UNLOCKED;
 	int cpu = smp_processor_id();
+	unsigned long flags;
 
 	if (cpumask_test_cpu(cpu, to_cpumask(backtrace_mask))) {
-		arch_spin_lock(&lock);
-		if (regs && cpu_in_idle(instruction_pointer(regs))) {
+		/*
+		 * Allow nested NMI backtraces while serializing
+		 * against other CPUs.
+		 */
+		printk_cpu_sync_get_irqsave(flags);
+		if (!READ_ONCE(backtrace_idle) && regs && cpu_in_idle(instruction_pointer(regs))) {
 			pr_warn("NMI backtrace for cpu %d skipped: idling at %pS\n",
 				cpu, (void *)instruction_pointer(regs));
 		} else {
@@ -102,7 +110,7 @@ bool nmi_cpu_backtrace(struct pt_regs *regs)
 			else
 				dump_stack();
 		}
-		arch_spin_unlock(&lock);
+		printk_cpu_sync_put_irqrestore(flags);
 		cpumask_clear_cpu(cpu, to_cpumask(backtrace_mask));
 		return true;
 	}

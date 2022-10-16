@@ -33,7 +33,8 @@
 
 #include "dce/dce_12_0_offset.h"
 #include "dce/dce_12_0_sh_mask.h"
-#include "soc15ip.h"
+#include "soc15_hw_ip.h"
+#include "vega10_ip_offset.h"
 #include "reg_helper.h"
 
 #define CTX \
@@ -49,6 +50,7 @@ struct dce120_hw_seq_reg_offsets {
 	uint32_t crtc;
 };
 
+#if 0
 static const struct dce120_hw_seq_reg_offsets reg_offsets[] = {
 {
 	.crtc = (mmCRTC0_CRTC_GSL_CONTROL - mmCRTC0_CRTC_GSL_CONTROL),
@@ -78,7 +80,6 @@ static const struct dce120_hw_seq_reg_offsets reg_offsets[] = {
 /*******************************************************************************
  * Private definitions
  ******************************************************************************/
-#if 0
 static void dce120_init_pte(struct dc_context *ctx, uint8_t controller_id)
 {
 	uint32_t addr;
@@ -243,7 +244,20 @@ static void dce120_update_dchub(
 	dh_data->dchub_info_valid = false;
 }
 
+/**
+ * dce121_xgmi_enabled() - Check if xGMI is enabled
+ * @hws: DCE hardware sequencer object
+ *
+ * Return true if xGMI is enabled. False otherwise.
+ */
+bool dce121_xgmi_enabled(struct dce_hwseq *hws)
+{
+	uint32_t pf_max_region;
 
+	REG_GET(MC_VM_XGMI_LFB_CNTL, PF_MAX_REGION, &pf_max_region);
+	/* PF_MAX_REGION == 0 means xgmi is disabled */
+	return !!pf_max_region;
+}
 
 void dce120_hw_sequencer_construct(struct dc *dc)
 {
@@ -251,7 +265,7 @@ void dce120_hw_sequencer_construct(struct dc *dc)
 	 * structure
 	 */
 	dce110_hw_sequencer_construct(dc);
-	dc->hwss.enable_display_power_gating = dce120_enable_display_power_gating;
+	dc->hwseq->funcs.enable_display_power_gating = dce120_enable_display_power_gating;
 	dc->hwss.update_dchub = dce120_update_dchub;
 }
 

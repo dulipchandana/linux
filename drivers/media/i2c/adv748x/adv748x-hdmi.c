@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Driver for Analog Devices ADV748X HDMI receiver and Component Processor (CP)
  *
  * Copyright (C) 2017 Renesas Electronics Corp.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/module.h>
@@ -105,6 +101,9 @@ static void adv748x_hdmi_fill_format(struct adv748x_hdmi *hdmi,
 
 	fmt->width = hdmi->timings.bt.width;
 	fmt->height = hdmi->timings.bt.height;
+
+	if (fmt->field == V4L2_FIELD_ALTERNATE)
+		fmt->height /= 2;
 }
 
 static void adv748x_fill_optional_dv_timings(struct v4l2_dv_timings *timings)
@@ -359,7 +358,7 @@ static int adv748x_hdmi_s_stream(struct v4l2_subdev *sd, int enable)
 
 	mutex_lock(&state->mutex);
 
-	ret = adv748x_txa_power(state, enable);
+	ret = adv748x_tx_power(hdmi->tx, enable);
 	if (ret)
 		goto done;
 
@@ -399,8 +398,6 @@ static int adv748x_hdmi_propagate_pixelrate(struct adv748x_hdmi *hdmi)
 {
 	struct v4l2_subdev *tx;
 	struct v4l2_dv_timings timings;
-	struct v4l2_bt_timings *bt = &timings.bt;
-	unsigned int fps;
 
 	tx = adv748x_get_remote_sd(&hdmi->pads[ADV748X_HDMI_SOURCE]);
 	if (!tx)
@@ -408,15 +405,11 @@ static int adv748x_hdmi_propagate_pixelrate(struct adv748x_hdmi *hdmi)
 
 	adv748x_hdmi_query_dv_timings(&hdmi->sd, &timings);
 
-	fps = DIV_ROUND_CLOSEST_ULL(bt->pixelclock,
-				    V4L2_DV_BT_FRAME_WIDTH(bt) *
-				    V4L2_DV_BT_FRAME_HEIGHT(bt));
-
-	return adv748x_csi2_set_pixelrate(tx, bt->width * bt->height * fps);
+	return adv748x_csi2_set_pixelrate(tx, timings.bt.pixelclock);
 }
 
 static int adv748x_hdmi_enum_mbus_code(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->index != 0)
@@ -428,7 +421,7 @@ static int adv748x_hdmi_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int adv748x_hdmi_get_format(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_pad_config *cfg,
+				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *sdformat)
 {
 	struct adv748x_hdmi *hdmi = adv748x_sd_to_hdmi(sd);
@@ -438,7 +431,8 @@ static int adv748x_hdmi_get_format(struct v4l2_subdev *sd,
 		return -EINVAL;
 
 	if (sdformat->which == V4L2_SUBDEV_FORMAT_TRY) {
-		mbusformat = v4l2_subdev_get_try_format(sd, cfg, sdformat->pad);
+		mbusformat = v4l2_subdev_get_try_format(sd, sd_state,
+							sdformat->pad);
 		sdformat->format = *mbusformat;
 	} else {
 		adv748x_hdmi_fill_format(hdmi, &sdformat->format);
@@ -449,7 +443,7 @@ static int adv748x_hdmi_get_format(struct v4l2_subdev *sd,
 }
 
 static int adv748x_hdmi_set_format(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_pad_config *cfg,
+				   struct v4l2_subdev_state *sd_state,
 				   struct v4l2_subdev_format *sdformat)
 {
 	struct v4l2_mbus_framefmt *mbusformat;
@@ -458,9 +452,9 @@ static int adv748x_hdmi_set_format(struct v4l2_subdev *sd,
 		return -EINVAL;
 
 	if (sdformat->which == V4L2_SUBDEV_FORMAT_ACTIVE)
-		return adv748x_hdmi_get_format(sd, cfg, sdformat);
+		return adv748x_hdmi_get_format(sd, sd_state, sdformat);
 
-	mbusformat = v4l2_subdev_get_try_format(sd, cfg, sdformat->pad);
+	mbusformat = v4l2_subdev_get_try_format(sd, sd_state, sdformat->pad);
 	*mbusformat = sdformat->format;
 
 	return 0;

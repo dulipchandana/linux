@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Support for AD5823 VCM.
  *
@@ -19,7 +20,6 @@
 #define __AD5823_H__
 
 #include <linux/types.h>
-
 
 #define AD5823_VCM_ADDR	0x0c
 
