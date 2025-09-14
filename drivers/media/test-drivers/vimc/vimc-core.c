@@ -81,7 +81,7 @@ struct vimc_pipeline_config {
  * Topology Configuration
  */
 
-static struct vimc_ent_config ent_config[] = {
+static const struct vimc_ent_config ent_config[] = {
 	[SENSOR_A] = {
 		.name = "Sensor A",
 		.type = &vimc_sensor_type
@@ -387,7 +387,7 @@ static int vimc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int vimc_remove(struct platform_device *pdev)
+static void vimc_remove(struct platform_device *pdev)
 {
 	struct vimc_device *vimc = platform_get_drvdata(pdev);
 
@@ -397,8 +397,6 @@ static int vimc_remove(struct platform_device *pdev)
 	media_device_unregister(&vimc->mdev);
 	v4l2_device_unregister(&vimc->v4l2_dev);
 	v4l2_device_put(&vimc->v4l2_dev);
-
-	return 0;
 }
 
 static void vimc_dev_release(struct device *dev)
@@ -433,7 +431,7 @@ static int __init vimc_init(void)
 	if (ret) {
 		dev_err(&vimc_pdev.dev,
 			"platform driver registration failed (err=%d)\n", ret);
-		platform_driver_unregister(&vimc_pdrv);
+		platform_device_unregister(&vimc_pdev);
 		return ret;
 	}
 

@@ -9,12 +9,10 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 
-#include <linux/blk-mq.h>
 #include <linux/delay.h>
 #include "blk.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
-#include "blk-mq-tag.h"
 
 /*
  * Recalculate wakeup batch when tag is shared by hctx.
@@ -40,22 +38,30 @@ static void blk_mq_update_wake_batch(struct blk_mq_tags *tags,
 void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 {
 	unsigned int users;
+	unsigned long flags;
+	struct blk_mq_tags *tags = hctx->tags;
 
+	/*
+	 * calling test_bit() prior to test_and_set_bit() is intentional,
+	 * it avoids dirtying the cacheline if the queue is already active.
+	 */
 	if (blk_mq_is_shared_tags(hctx->flags)) {
 		struct request_queue *q = hctx->queue;
 
-		if (test_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags))
+		if (test_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags) ||
+		    test_and_set_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags))
 			return;
-		set_bit(QUEUE_FLAG_HCTX_ACTIVE, &q->queue_flags);
 	} else {
-		if (test_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state))
+		if (test_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state) ||
+		    test_and_set_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state))
 			return;
-		set_bit(BLK_MQ_S_TAG_ACTIVE, &hctx->state);
 	}
 
-	users = atomic_inc_return(&hctx->tags->active_queues);
-
-	blk_mq_update_wake_batch(hctx->tags, users);
+	spin_lock_irqsave(&tags->lock, flags);
+	users = tags->active_queues + 1;
+	WRITE_ONCE(tags->active_queues, users);
+	blk_mq_update_wake_batch(tags, users);
+	spin_unlock_irqrestore(&tags->lock, flags);
 }
 
 /*
@@ -88,9 +94,11 @@ void __blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx)
 			return;
 	}
 
-	users = atomic_dec_return(&tags->active_queues);
-
+	spin_lock_irq(&tags->lock);
+	users = tags->active_queues - 1;
+	WRITE_ONCE(tags->active_queues, users);
 	blk_mq_update_wake_batch(tags, users);
+	spin_unlock_irq(&tags->lock);
 
 	blk_mq_tag_wakeup_all(tags, false);
 }
@@ -182,8 +190,7 @@ unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 		sbitmap_finish_wait(bt, ws, &wait);
 
 		data->ctx = blk_mq_get_ctx(data->q);
-		data->hctx = blk_mq_map_queue(data->q, data->cmd_flags,
-						data->ctx);
+		data->hctx = blk_mq_map_queue(data->cmd_flags, data->ctx);
 		tags = blk_mq_tags_from_data(data);
 		if (data->flags & BLK_MQ_REQ_RESERVED)
 			bt = &tags->breserved_tags;
@@ -536,30 +543,11 @@ static int bt_alloc(struct sbitmap_queue *bt, unsigned int depth,
 				       node);
 }
 
-int blk_mq_init_bitmaps(struct sbitmap_queue *bitmap_tags,
-			struct sbitmap_queue *breserved_tags,
-			unsigned int queue_depth, unsigned int reserved,
-			int node, int alloc_policy)
-{
-	unsigned int depth = queue_depth - reserved;
-	bool round_robin = alloc_policy == BLK_TAG_ALLOC_RR;
-
-	if (bt_alloc(bitmap_tags, depth, round_robin, node))
-		return -ENOMEM;
-	if (bt_alloc(breserved_tags, reserved, round_robin, node))
-		goto free_bitmap_tags;
-
-	return 0;
-
-free_bitmap_tags:
-	sbitmap_queue_free(bitmap_tags);
-	return -ENOMEM;
-}
-
 struct blk_mq_tags *blk_mq_init_tags(unsigned int total_tags,
-				     unsigned int reserved_tags,
-				     int node, int alloc_policy)
+		unsigned int reserved_tags, unsigned int flags, int node)
 {
+	unsigned int depth = total_tags - reserved_tags;
+	bool round_robin = flags & BLK_MQ_F_TAG_RR;
 	struct blk_mq_tags *tags;
 
 	if (total_tags > BLK_MQ_TAG_MAX) {
@@ -574,14 +562,18 @@ struct blk_mq_tags *blk_mq_init_tags(unsigned int total_tags,
 	tags->nr_tags = total_tags;
 	tags->nr_reserved_tags = reserved_tags;
 	spin_lock_init(&tags->lock);
+	if (bt_alloc(&tags->bitmap_tags, depth, round_robin, node))
+		goto out_free_tags;
+	if (bt_alloc(&tags->breserved_tags, reserved_tags, round_robin, node))
+		goto out_free_bitmap_tags;
 
-	if (blk_mq_init_bitmaps(&tags->bitmap_tags, &tags->breserved_tags,
-				total_tags, reserved_tags, node,
-				alloc_policy) < 0) {
-		kfree(tags);
-		return NULL;
-	}
 	return tags;
+
+out_free_bitmap_tags:
+	sbitmap_queue_free(&tags->bitmap_tags);
+out_free_tags:
+	kfree(tags);
+	return NULL;
 }
 
 void blk_mq_free_tags(struct blk_mq_tags *tags)

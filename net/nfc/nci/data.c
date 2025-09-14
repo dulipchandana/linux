@@ -42,7 +42,7 @@ void nci_data_exchange_complete(struct nci_dev *ndev, struct sk_buff *skb,
 	pr_debug("len %d, err %d\n", skb ? skb->len : 0, err);
 
 	/* data exchange is complete, stop the data timer */
-	del_timer_sync(&ndev->data_timer);
+	timer_delete_sync(&ndev->data_timer);
 	clear_bit(NCI_DATA_EXCHANGE_TO, &ndev->flags);
 
 	if (cb) {
@@ -279,8 +279,10 @@ void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb)
 		 nci_plen(skb->data));
 
 	conn_info = nci_get_conn_info_by_conn_id(ndev, nci_conn_id(skb->data));
-	if (!conn_info)
+	if (!conn_info) {
+		kfree_skb(skb);
 		return;
+	}
 
 	/* strip the nci data header */
 	skb_pull(skb, NCI_DATA_HDR_SIZE);

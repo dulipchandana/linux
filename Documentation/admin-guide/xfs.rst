@@ -124,6 +124,14 @@ When mounting an XFS filesystem, the following options are accepted.
 	controls the size of each buffer and so is also relevant to
 	this case.
 
+  lifetime (default) or nolifetime
+	Enable data placement based on write life time hints provided
+	by the user. This turns on co-allocation of data of similar
+	life times when statistically favorable to reduce garbage
+	collection cost.
+
+	These options are only available for zoned rt file systems.
+
   logbsize=value
 	Set the size of each in-memory log buffer.  The size may be
 	specified in bytes, or in kilobytes with a "k" suffix.
@@ -142,6 +150,25 @@ When mounting an XFS filesystem, the following options are accepted.
 	section, and a real-time section.  The real-time section is
 	optional, and the log section can be separate from the data
 	section or contained within it.
+
+  max_atomic_write=value
+	Set the maximum size of an atomic write.  The size may be
+	specified in bytes, in kilobytes with a "k" suffix, in megabytes
+	with a "m" suffix, or in gigabytes with a "g" suffix.  The size
+	cannot be larger than the maximum write size, larger than the
+	size of any allocation group, or larger than the size of a
+	remapping operation that the log can complete atomically.
+
+	The default value is to set the maximum I/O completion size
+	to allow each CPU to handle one at a time.
+
+  max_open_zones=value
+	Specify the max number of zones to keep open for writing on a
+	zoned rt device. Many open zones aids file data separation
+	but may impact performance on HDDs.
+
+	If ``max_open_zones`` is not specified, the value is determined
+	by the capabilities and the size of the zoned rt device.
 
   noalign
 	Data allocations will not be aligned at stripe unit
@@ -192,7 +219,7 @@ When mounting an XFS filesystem, the following options are accepted.
 	are any integer multiple of a valid ``sunit`` value.
 
 	Typically the only time these mount options are necessary if
-	after an underlying RAID device has had it's geometry
+	after an underlying RAID device has had its geometry
 	modified, such as adding a new disk to a RAID5 lun and
 	reshaping it.
 
@@ -236,13 +263,14 @@ the dates listed above.
 Deprecated Mount Options
 ========================
 
-===========================     ================
+============================    ================
   Name				Removal Schedule
-===========================     ================
+============================    ================
 Mounting with V4 filesystem     September 2030
+Mounting ascii-ci filesystem    September 2030
 ikeep/noikeep			September 2025
 attr2/noattr2			September 2025
-===========================     ================
+============================    ================
 
 
 Removed Mount Options
@@ -296,7 +324,7 @@ The following sysctls are available for the XFS filesystem:
 		XFS_ERRLEVEL_LOW:       1
 		XFS_ERRLEVEL_HIGH:      5
 
-  fs.xfs.panic_mask		(Min: 0  Default: 0  Max: 256)
+  fs.xfs.panic_mask		(Min: 0  Default: 0  Max: 511)
 	Causes certain error conditions to call BUG(). Value is a bitmask;
 	OR together the tags which represent errors which should cause panics:
 
@@ -541,3 +569,24 @@ The interesting knobs for XFS workqueues are as follows:
   nice           Relative priority of scheduling the threads.  These are the
                  same nice levels that can be applied to userspace processes.
 ============     ===========
+
+Zoned Filesystems
+=================
+
+For zoned file systems, the following attributes are exposed in:
+
+  /sys/fs/xfs/<dev>/zoned/
+
+  max_open_zones		(Min:  1  Default:  Varies  Max:  UINTMAX)
+	This read-only attribute exposes the maximum number of open zones
+	available for data placement. The value is determined at mount time and
+	is limited by the capabilities of the backing zoned device, file system
+	size and the max_open_zones mount option.
+
+  zonegc_low_space		(Min:  0  Default:  0  Max:  100)
+	Define a percentage for how much of the unused space that GC should keep
+	available for writing. A high value will reclaim more of the space
+	occupied by unused blocks, creating a larger buffer against write
+	bursts at the cost of increased write amplification.  Regardless
+	of this value, garbage collection will always aim to free a minimum
+	amount of blocks to keep max_open_zones open for data placement purposes.

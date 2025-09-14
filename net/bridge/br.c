@@ -51,6 +51,13 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		}
 	}
 
+	if (is_vlan_dev(dev)) {
+		struct net_device *real_dev = vlan_dev_real_dev(dev);
+
+		if (netif_is_bridge_master(real_dev))
+			br_vlan_vlan_upper_event(real_dev, dev, event);
+	}
+
 	/* not a port of a bridge */
 	p = br_port_get_rtnl(dev);
 	if (!p)
@@ -67,9 +74,9 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 		if (br->dev->addr_assign_type == NET_ADDR_SET)
 			break;
 		prechaddr_info = ptr;
-		err = dev_pre_changeaddr_notify(br->dev,
-						prechaddr_info->dev_addr,
-						extack);
+		err = netif_pre_changeaddr_notify(br->dev,
+						  prechaddr_info->dev_addr,
+						  extack);
 		if (err)
 			return notifier_from_errno(err);
 		break;
@@ -166,13 +173,14 @@ static int br_switchdev_event(struct notifier_block *unused,
 	case SWITCHDEV_FDB_ADD_TO_BRIDGE:
 		fdb_info = ptr;
 		err = br_fdb_external_learn_add(br, p, fdb_info->addr,
-						fdb_info->vid, false);
+						fdb_info->vid,
+						fdb_info->locked, false);
 		if (err) {
 			err = notifier_from_errno(err);
 			break;
 		}
 		br_fdb_offloaded_set(br, p, fdb_info->addr,
-				     fdb_info->vid, true);
+				     fdb_info->vid, fdb_info->offloaded);
 		break;
 	case SWITCHDEV_FDB_DEL_TO_BRIDGE:
 		fdb_info = ptr;
@@ -233,6 +241,14 @@ static int br_switchdev_blocking_event(struct notifier_block *nb,
 		br_switchdev_port_unoffload(p, b->ctx, b->atomic_nb,
 					    b->blocking_nb);
 		break;
+	case SWITCHDEV_BRPORT_REPLAY:
+		brport_info = ptr;
+		b = &brport_info->brport;
+
+		err = br_switchdev_port_replay(p, b->dev, b->ctx, b->atomic_nb,
+					       b->blocking_nb, extack);
+		err = notifier_from_errno(err);
+		break;
 	}
 
 out:
@@ -268,6 +284,9 @@ int br_boolopt_toggle(struct net_bridge *br, enum br_boolopt_id opt, bool on,
 	case BR_BOOLOPT_MST_ENABLE:
 		err = br_mst_set_enabled(br, on, extack);
 		break;
+	case BR_BOOLOPT_MDB_OFFLOAD_FAIL_NOTIFICATION:
+		br_opt_toggle(br, BROPT_MDB_OFFLOAD_FAIL_NOTIFICATION, on);
+		break;
 	default:
 		/* shouldn't be called with unsupported options */
 		WARN_ON(1);
@@ -286,6 +305,8 @@ int br_boolopt_get(const struct net_bridge *br, enum br_boolopt_id opt)
 		return br_opt_get(br, BROPT_MCAST_VLAN_SNOOPING_ENABLED);
 	case BR_BOOLOPT_MST_ENABLE:
 		return br_opt_get(br, BROPT_MST_ENABLED);
+	case BR_BOOLOPT_MDB_OFFLOAD_FAIL_NOTIFICATION:
+		return br_opt_get(br, BROPT_MDB_OFFLOAD_FAIL_NOTIFICATION);
 	default:
 		/* shouldn't be called with unsupported options */
 		WARN_ON(1);
@@ -302,6 +323,13 @@ int br_boolopt_multi_toggle(struct net_bridge *br,
 	unsigned long bitmap = bm->optmask;
 	int err = 0;
 	int opt_id;
+
+	opt_id = find_next_bit(&bitmap, BITS_PER_LONG, BR_BOOLOPT_MAX);
+	if (opt_id != BITS_PER_LONG) {
+		NL_SET_ERR_MSG_FMT_MOD(extack, "Unknown boolean option %d",
+				       opt_id);
+		return -EINVAL;
+	}
 
 	for_each_set_bit(opt_id, &bitmap, BR_BOOLOPT_MAX) {
 		bool on = !!(bm->optval & BIT(opt_id));
@@ -347,26 +375,20 @@ void br_opt_toggle(struct net_bridge *br, enum net_bridge_opts opt, bool on)
 		clear_bit(opt, &br->options);
 }
 
-static void __net_exit br_net_exit_batch(struct list_head *net_list)
+static void __net_exit br_net_exit_rtnl(struct net *net,
+					struct list_head *dev_to_kill)
 {
 	struct net_device *dev;
-	struct net *net;
-	LIST_HEAD(list);
 
-	rtnl_lock();
+	ASSERT_RTNL_NET(net);
 
-	list_for_each_entry(net, net_list, exit_list)
-		for_each_netdev(net, dev)
-			if (netif_is_bridge_master(dev))
-				br_dev_delete(dev, &list);
-
-	unregister_netdevice_many(&list);
-
-	rtnl_unlock();
+	for_each_netdev(net, dev)
+		if (netif_is_bridge_master(dev))
+			br_dev_delete(dev, dev_to_kill);
 }
 
 static struct pernet_operations br_net_ops = {
-	.exit_batch	= br_net_exit_batch,
+	.exit_rtnl = br_net_exit_rtnl,
 };
 
 static const struct stp_proto br_stp_proto = {
@@ -468,3 +490,5 @@ module_exit(br_deinit)
 MODULE_LICENSE("GPL");
 MODULE_VERSION(BR_VERSION);
 MODULE_ALIAS_RTNL_LINK("bridge");
+MODULE_DESCRIPTION("Ethernet bridge driver");
+MODULE_IMPORT_NS("NETDEV_INTERNAL");

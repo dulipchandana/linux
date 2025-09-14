@@ -15,7 +15,7 @@
 
 MODULE_DESCRIPTION("BridgeCo BeBoB driver");
 MODULE_AUTHOR("Takashi Sakamoto <o-takashi@sakamocchi.jp>");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 
 static int index[SNDRV_CARDS]	= SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS]	= SNDRV_DEFAULT_STR;
@@ -105,9 +105,9 @@ name_device(struct snd_bebob *bebob)
 	if (err < 0)
 		goto end;
 
-	strcpy(bebob->card->driver, "BeBoB");
-	strcpy(bebob->card->shortname, model);
-	strcpy(bebob->card->mixername, model);
+	strscpy(bebob->card->driver, "BeBoB");
+	strscpy(bebob->card->shortname, model);
+	strscpy(bebob->card->mixername, model);
 	snprintf(bebob->card->longname, sizeof(bebob->card->longname),
 		 "%s %s (id:%d, rev:%d), GUID %08x%08x at %s, S%d",
 		 vendor, model, hw_id, revision,

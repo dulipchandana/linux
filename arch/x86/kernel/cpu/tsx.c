@@ -11,6 +11,8 @@
 #include <linux/cpufeature.h>
 
 #include <asm/cmdline.h>
+#include <asm/cpu.h>
+#include <asm/msr.h>
 
 #include "cpu.h"
 
@@ -23,7 +25,7 @@ static void tsx_disable(void)
 {
 	u64 tsx;
 
-	rdmsrl(MSR_IA32_TSX_CTRL, tsx);
+	rdmsrq(MSR_IA32_TSX_CTRL, tsx);
 
 	/* Force all transactions to immediately abort */
 	tsx |= TSX_CTRL_RTM_DISABLE;
@@ -36,14 +38,14 @@ static void tsx_disable(void)
 	 */
 	tsx |= TSX_CTRL_CPUID_CLEAR;
 
-	wrmsrl(MSR_IA32_TSX_CTRL, tsx);
+	wrmsrq(MSR_IA32_TSX_CTRL, tsx);
 }
 
 static void tsx_enable(void)
 {
 	u64 tsx;
 
-	rdmsrl(MSR_IA32_TSX_CTRL, tsx);
+	rdmsrq(MSR_IA32_TSX_CTRL, tsx);
 
 	/* Enable the RTM feature in the cpu */
 	tsx &= ~TSX_CTRL_RTM_DISABLE;
@@ -55,25 +57,7 @@ static void tsx_enable(void)
 	 */
 	tsx &= ~TSX_CTRL_CPUID_CLEAR;
 
-	wrmsrl(MSR_IA32_TSX_CTRL, tsx);
-}
-
-static bool tsx_ctrl_is_supported(void)
-{
-	u64 ia32_cap = x86_read_arch_cap_msr();
-
-	/*
-	 * TSX is controlled via MSR_IA32_TSX_CTRL.  However, support for this
-	 * MSR is enumerated by ARCH_CAP_TSX_MSR bit in MSR_IA32_ARCH_CAPABILITIES.
-	 *
-	 * TSX control (aka MSR_IA32_TSX_CTRL) is only available after a
-	 * microcode update on CPUs that have their MSR_IA32_ARCH_CAPABILITIES
-	 * bit MDS_NO=1. CPUs with MDS_NO=0 are not planned to get
-	 * MSR_IA32_TSX_CTRL support even after a microcode update. Thus,
-	 * tsx= cmdline requests will do nothing on CPUs without
-	 * MSR_IA32_TSX_CTRL support.
-	 */
-	return !!(ia32_cap & ARCH_CAP_TSX_CTRL_MSR);
+	wrmsrq(MSR_IA32_TSX_CTRL, tsx);
 }
 
 static enum tsx_ctrl_states x86_get_tsx_auto_mode(void)
@@ -132,13 +116,13 @@ static void tsx_clear_cpuid(void)
 	 */
 	if (boot_cpu_has(X86_FEATURE_RTM_ALWAYS_ABORT) &&
 	    boot_cpu_has(X86_FEATURE_TSX_FORCE_ABORT)) {
-		rdmsrl(MSR_TSX_FORCE_ABORT, msr);
+		rdmsrq(MSR_TSX_FORCE_ABORT, msr);
 		msr |= MSR_TFA_TSX_CPUID_CLEAR;
-		wrmsrl(MSR_TSX_FORCE_ABORT, msr);
-	} else if (tsx_ctrl_is_supported()) {
-		rdmsrl(MSR_IA32_TSX_CTRL, msr);
+		wrmsrq(MSR_TSX_FORCE_ABORT, msr);
+	} else if (cpu_feature_enabled(X86_FEATURE_MSR_TSX_CTRL)) {
+		rdmsrq(MSR_IA32_TSX_CTRL, msr);
 		msr |= TSX_CTRL_CPUID_CLEAR;
-		wrmsrl(MSR_IA32_TSX_CTRL, msr);
+		wrmsrq(MSR_IA32_TSX_CTRL, msr);
 	}
 }
 
@@ -158,15 +142,16 @@ static void tsx_dev_mode_disable(void)
 	u64 mcu_opt_ctrl;
 
 	/* Check if RTM_ALLOW exists */
-	if (!boot_cpu_has_bug(X86_BUG_TAA) || !tsx_ctrl_is_supported() ||
+	if (!boot_cpu_has_bug(X86_BUG_TAA) ||
+	    !cpu_feature_enabled(X86_FEATURE_MSR_TSX_CTRL) ||
 	    !cpu_feature_enabled(X86_FEATURE_SRBDS_CTRL))
 		return;
 
-	rdmsrl(MSR_IA32_MCU_OPT_CTRL, mcu_opt_ctrl);
+	rdmsrq(MSR_IA32_MCU_OPT_CTRL, mcu_opt_ctrl);
 
 	if (mcu_opt_ctrl & RTM_ALLOW) {
 		mcu_opt_ctrl &= ~RTM_ALLOW;
-		wrmsrl(MSR_IA32_MCU_OPT_CTRL, mcu_opt_ctrl);
+		wrmsrq(MSR_IA32_MCU_OPT_CTRL, mcu_opt_ctrl);
 		setup_force_cpu_cap(X86_FEATURE_RTM_ALWAYS_ABORT);
 	}
 }
@@ -191,7 +176,20 @@ void __init tsx_init(void)
 		return;
 	}
 
-	if (!tsx_ctrl_is_supported()) {
+	/*
+	 * TSX is controlled via MSR_IA32_TSX_CTRL.  However, support for this
+	 * MSR is enumerated by ARCH_CAP_TSX_MSR bit in MSR_IA32_ARCH_CAPABILITIES.
+	 *
+	 * TSX control (aka MSR_IA32_TSX_CTRL) is only available after a
+	 * microcode update on CPUs that have their MSR_IA32_ARCH_CAPABILITIES
+	 * bit MDS_NO=1. CPUs with MDS_NO=0 are not planned to get
+	 * MSR_IA32_TSX_CTRL support even after a microcode update. Thus,
+	 * tsx= cmdline requests will do nothing on CPUs without
+	 * MSR_IA32_TSX_CTRL support.
+	 */
+	if (x86_read_arch_cap_msr() & ARCH_CAP_TSX_CTRL_MSR) {
+		setup_force_cpu_cap(X86_FEATURE_MSR_TSX_CTRL);
+	} else {
 		tsx_ctrl_state = TSX_CTRL_NOT_SUPPORTED;
 		return;
 	}

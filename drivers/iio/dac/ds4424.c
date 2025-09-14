@@ -213,9 +213,9 @@ static const struct iio_info ds4424_info = {
 	.write_raw = ds4424_write_raw,
 };
 
-static int ds4424_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int ds4424_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct ds4424_data *data;
 	struct iio_dev *indio_dev;
 	int ret;
@@ -301,7 +301,7 @@ MODULE_DEVICE_TABLE(i2c, ds4424_id);
 static const struct of_device_id ds4424_of_match[] = {
 	{ .compatible = "maxim,ds4422" },
 	{ .compatible = "maxim,ds4424" },
-	{ },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(of, ds4424_of_match);

@@ -1477,10 +1477,8 @@ static int dac33_i2c_probe(struct i2c_client *client)
 	if (dac33 == NULL)
 		return -ENOMEM;
 
-	dac33->reg_cache = devm_kmemdup(&client->dev,
-					dac33_reg,
-					ARRAY_SIZE(dac33_reg) * sizeof(u8),
-					GFP_KERNEL);
+	dac33->reg_cache = devm_kmemdup_array(&client->dev, dac33_reg, ARRAY_SIZE(dac33_reg),
+					      sizeof(dac33_reg[0]), GFP_KERNEL);
 	if (!dac33->reg_cache)
 		return -ENOMEM;
 
@@ -1560,7 +1558,7 @@ static struct i2c_driver tlv320dac33_i2c_driver = {
 	.driver = {
 		.name = "tlv320dac33-codec",
 	},
-	.probe_new	= dac33_i2c_probe,
+	.probe		= dac33_i2c_probe,
 	.remove		= dac33_i2c_remove,
 	.id_table	= tlv320dac33_i2c_id,
 };

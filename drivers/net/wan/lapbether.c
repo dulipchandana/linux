@@ -39,6 +39,7 @@
 #include <linux/lapb.h>
 #include <linux/init.h>
 
+#include <net/netdev_lock.h>
 #include <net/x25device.h>
 
 static const u8 bcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -80,7 +81,7 @@ static struct lapbethdev *lapbeth_get_x25_dev(struct net_device *dev)
 
 static __inline__ int dev_is_ethdev(struct net_device *dev)
 {
-	return dev->type == ARPHRD_ETHER && strncmp(dev->name, "dummy", 5);
+	return dev->type == ARPHRD_ETHER && !netdev_need_ops_lock(dev);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -325,6 +326,7 @@ static int lapbeth_open(struct net_device *dev)
 
 	err = lapb_register(dev, &lapbeth_callbacks);
 	if (err != LAPB_OK) {
+		napi_disable(&lapbeth->napi);
 		pr_err("lapb_register error: %d\n", err);
 		return -ENODEV;
 	}
@@ -365,6 +367,7 @@ static const struct net_device_ops lapbeth_netdev_ops = {
 
 static void lapbeth_setup(struct net_device *dev)
 {
+	netdev_lockdep_set_classes(dev);
 	dev->netdev_ops	     = &lapbeth_netdev_ops;
 	dev->needs_free_netdev = true;
 	dev->type            = ARPHRD_X25;
@@ -382,6 +385,9 @@ static int lapbeth_new_device(struct net_device *dev)
 	int rc = -ENOMEM;
 
 	ASSERT_RTNL();
+
+	if (dev->type != ARPHRD_ETHER)
+		return -EINVAL;
 
 	ndev = alloc_netdev(sizeof(*lapbeth), "lapb%d", NET_NAME_UNKNOWN,
 			    lapbeth_setup);
@@ -446,7 +452,7 @@ static int lapbeth_device_event(struct notifier_block *this,
 	if (dev_net(dev) != &init_net)
 		return NOTIFY_DONE;
 
-	if (!dev_is_ethdev(dev))
+	if (!dev_is_ethdev(dev) && !lapbeth_get_x25_dev(dev))
 		return NOTIFY_DONE;
 
 	switch (event) {

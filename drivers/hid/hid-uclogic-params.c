@@ -18,7 +18,8 @@
 #include "usbhid/usbhid.h"
 #include "hid-ids.h"
 #include <linux/ctype.h>
-#include <asm/unaligned.h>
+#include <linux/string.h>
+#include <linux/unaligned.h>
 
 /**
  * uclogic_params_pen_inrange_to_str() - Convert a pen in-range reporting type
@@ -102,6 +103,8 @@ static void uclogic_params_frame_hid_dbg(
 		frame->touch_flip_at);
 	hid_dbg(hdev, "\t\t.bitmap_dial_byte = %u\n",
 		frame->bitmap_dial_byte);
+	hid_dbg(hdev, "\t\t.bitmap_second_dial_destination_byte = %u\n",
+			frame->bitmap_second_dial_destination_byte);
 }
 
 /**
@@ -615,6 +618,31 @@ cleanup:
 }
 
 /**
+ * uclogic_params_cleanup_event_hooks - free resources used by the list of raw
+ * event hooks.
+ * Can be called repeatedly.
+ *
+ * @params: Input parameters to cleanup. Cannot be NULL.
+ */
+static void uclogic_params_cleanup_event_hooks(struct uclogic_params *params)
+{
+	struct uclogic_raw_event_hook *curr, *n;
+
+	if (!params || !params->event_hooks)
+		return;
+
+	list_for_each_entry_safe(curr, n, &params->event_hooks->list, list) {
+		cancel_work_sync(&curr->work);
+		list_del(&curr->list);
+		kfree(curr->event);
+		kfree(curr);
+	}
+
+	kfree(params->event_hooks);
+	params->event_hooks = NULL;
+}
+
+/**
  * uclogic_params_cleanup - free resources used by struct uclogic_params
  * (tablet interface's parameters).
  * Can be called repeatedly.
@@ -630,6 +658,7 @@ void uclogic_params_cleanup(struct uclogic_params *params)
 		for (i = 0; i < ARRAY_SIZE(params->frame_list); i++)
 			uclogic_params_frame_cleanup(&params->frame_list[i]);
 
+		uclogic_params_cleanup_event_hooks(params);
 		memset(params, 0, sizeof(*params));
 	}
 }
@@ -654,7 +683,7 @@ void uclogic_params_cleanup(struct uclogic_params *params)
  *	-ENOMEM, if failed to allocate memory.
  */
 int uclogic_params_get_desc(const struct uclogic_params *params,
-				__u8 **pdesc,
+				const __u8 **pdesc,
 				unsigned int *psize)
 {
 	int rc = -ENOMEM;
@@ -742,7 +771,7 @@ static void uclogic_params_init_invalid(struct uclogic_params *params)
 static int uclogic_params_init_with_opt_desc(struct uclogic_params *params,
 					     struct hid_device *hdev,
 					     unsigned int orig_desc_size,
-					     __u8 *desc_ptr,
+					     const __u8 *desc_ptr,
 					     unsigned int desc_size)
 {
 	__u8 *desc_copy_ptr = NULL;
@@ -815,7 +844,7 @@ static int uclogic_params_huion_init(struct uclogic_params *params,
 	__u8 *params_ptr = NULL;
 	size_t params_len = 0;
 	/* Parameters string descriptor of a model with touch ring (HS610) */
-	const __u8 touch_ring_model_params_buf[] = {
+	static const __u8 touch_ring_model_params_buf[] = {
 		0x13, 0x03, 0x70, 0xC6, 0x00, 0x06, 0x7C, 0x00,
 		0xFF, 0x1F, 0xD8, 0x13, 0x03, 0x0D, 0x10, 0x01,
 		0x04, 0x3C, 0x3E
@@ -856,6 +885,9 @@ static int uclogic_params_huion_init(struct uclogic_params *params,
 			"failed retrieving Huion firmware version: %d\n", rc);
 		goto cleanup;
 	}
+
+	/* The firmware is used in userspace as unique identifier */
+	strscpy(hdev->uniq, ver_ptr, sizeof(hdev->uniq));
 
 	/* If this is a transition firmware */
 	if (strcmp(ver_ptr, transition_ver) == 0) {
@@ -1020,8 +1052,8 @@ cleanup:
  * Returns:
  *	Zero, if successful. A negative errno code on error.
  */
-static int uclogic_probe_interface(struct hid_device *hdev, u8 *magic_arr,
-				   int magic_size, int endpoint)
+static int uclogic_probe_interface(struct hid_device *hdev, const u8 *magic_arr,
+				   size_t magic_size, int endpoint)
 {
 	struct usb_device *udev;
 	unsigned int pipe = 0;
@@ -1212,6 +1244,140 @@ static int uclogic_params_ugee_v2_init_frame_mouse(struct uclogic_params *p)
 }
 
 /**
+ * uclogic_params_ugee_v2_has_battery() - check whether a UGEE v2 device has
+ * battery or not.
+ * @hdev:	The HID device of the tablet interface.
+ *
+ * Returns:
+ *	True if the device has battery, false otherwise.
+ */
+static bool uclogic_params_ugee_v2_has_battery(struct hid_device *hdev)
+{
+	struct uclogic_drvdata *drvdata = hid_get_drvdata(hdev);
+
+	if (drvdata->quirks & UCLOGIC_BATTERY_QUIRK)
+		return true;
+
+	/* The XP-PEN Deco LW vendor, product and version are identical to the
+	 * Deco L. The only difference reported by their firmware is the product
+	 * name. Add a quirk to support battery reporting on the wireless
+	 * version.
+	 */
+	if (hdev->vendor == USB_VENDOR_ID_UGEE &&
+	    hdev->product == USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO_L) {
+		struct usb_device *udev = hid_to_usb_dev(hdev);
+
+		if (strstarts(udev->product, "Deco LW"))
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * uclogic_params_ugee_v2_init_battery() - initialize UGEE v2 battery reporting.
+ * @hdev:	The HID device of the tablet interface, cannot be NULL.
+ * @p:		Parameters to fill in, cannot be NULL.
+ *
+ * Returns:
+ *	Zero, if successful. A negative errno code on error.
+ */
+static int uclogic_params_ugee_v2_init_battery(struct hid_device *hdev,
+					       struct uclogic_params *p)
+{
+	int rc = 0;
+
+	if (!hdev || !p)
+		return -EINVAL;
+
+	/* Some tablets contain invalid characters in hdev->uniq, throwing a
+	 * "hwmon: '<name>' is not a valid name attribute, please fix" error.
+	 * Use the device vendor and product IDs instead.
+	 */
+	snprintf(hdev->uniq, sizeof(hdev->uniq), "%x-%x", hdev->vendor,
+		 hdev->product);
+
+	rc = uclogic_params_frame_init_with_desc(&p->frame_list[1],
+						 uclogic_rdesc_ugee_v2_battery_template_arr,
+						 uclogic_rdesc_ugee_v2_battery_template_size,
+						 UCLOGIC_RDESC_UGEE_V2_BATTERY_ID);
+	if (rc)
+		return rc;
+
+	p->frame_list[1].suffix = "Battery";
+	p->pen.subreport_list[1].value = 0xf2;
+	p->pen.subreport_list[1].id = UCLOGIC_RDESC_UGEE_V2_BATTERY_ID;
+
+	return rc;
+}
+
+/**
+ * uclogic_params_ugee_v2_reconnect_work() - When a wireless tablet looses
+ * connection to the USB dongle and reconnects, either because of its physical
+ * distance or because it was switches off and on using the frame's switch,
+ * uclogic_probe_interface() needs to be called again to enable the tablet.
+ *
+ * @work: The work that triggered this function.
+ */
+static void uclogic_params_ugee_v2_reconnect_work(struct work_struct *work)
+{
+	struct uclogic_raw_event_hook *event_hook;
+
+	event_hook = container_of(work, struct uclogic_raw_event_hook, work);
+	uclogic_probe_interface(event_hook->hdev, uclogic_ugee_v2_probe_arr,
+				uclogic_ugee_v2_probe_size,
+				uclogic_ugee_v2_probe_endpoint);
+}
+
+/**
+ * uclogic_params_ugee_v2_init_event_hooks() - initialize the list of events
+ * to be hooked for UGEE v2 devices.
+ * @hdev:	The HID device of the tablet interface to initialize and get
+ *		parameters from.
+ * @p:		Parameters to fill in, cannot be NULL.
+ *
+ * Returns:
+ *	Zero, if successful. A negative errno code on error.
+ */
+static int uclogic_params_ugee_v2_init_event_hooks(struct hid_device *hdev,
+						   struct uclogic_params *p)
+{
+	struct uclogic_raw_event_hook *event_hook;
+	static const __u8 reconnect_event[] = {
+		/* Event received on wireless tablet reconnection */
+		0x02, 0xF8, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	};
+
+	if (!p)
+		return -EINVAL;
+
+	/* The reconnection event is only received if the tablet has battery */
+	if (!uclogic_params_ugee_v2_has_battery(hdev))
+		return 0;
+
+	p->event_hooks = kzalloc(sizeof(*p->event_hooks), GFP_KERNEL);
+	if (!p->event_hooks)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&p->event_hooks->list);
+
+	event_hook = kzalloc(sizeof(*event_hook), GFP_KERNEL);
+	if (!event_hook)
+		return -ENOMEM;
+
+	INIT_WORK(&event_hook->work, uclogic_params_ugee_v2_reconnect_work);
+	event_hook->hdev = hdev;
+	event_hook->size = ARRAY_SIZE(reconnect_event);
+	event_hook->event = kmemdup(reconnect_event, event_hook->size, GFP_KERNEL);
+	if (!event_hook->event)
+		return -ENOMEM;
+
+	list_add_tail(&event_hook->list, &p->event_hooks->list);
+
+	return 0;
+}
+
+/**
  * uclogic_params_ugee_v2_init() - initialize a UGEE graphics tablets by
  * discovering their parameters.
  *
@@ -1234,6 +1400,7 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 				       struct hid_device *hdev)
 {
 	int rc = 0;
+	struct uclogic_drvdata *drvdata;
 	struct usb_interface *iface;
 	__u8 bInterfaceNumber;
 	const int str_desc_len = 12;
@@ -1241,9 +1408,6 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 	__u8 *rdesc_pen = NULL;
 	s32 desc_params[UCLOGIC_RDESC_PH_ID_NUM];
 	enum uclogic_params_frame_type frame_type;
-	__u8 magic_arr[] = {
-		0x02, 0xb0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-	};
 	/* The resulting parameters (noop) */
 	struct uclogic_params p = {0, };
 
@@ -1252,6 +1416,7 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 		goto cleanup;
 	}
 
+	drvdata = hid_get_drvdata(hdev);
 	iface = to_usb_interface(hdev->dev.parent);
 	bInterfaceNumber = iface->cur_altsetting->desc.bInterfaceNumber;
 
@@ -1273,7 +1438,9 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 	 * The specific data was discovered by sniffing the Windows driver
 	 * traffic.
 	 */
-	rc = uclogic_probe_interface(hdev, magic_arr, sizeof(magic_arr), 0x03);
+	rc = uclogic_probe_interface(hdev, uclogic_ugee_v2_probe_arr,
+				     uclogic_ugee_v2_probe_size,
+				     uclogic_ugee_v2_probe_endpoint);
 	if (rc) {
 		uclogic_params_init_invalid(&p);
 		goto output;
@@ -1318,6 +1485,9 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 	p.pen.subreport_list[0].id = UCLOGIC_RDESC_V1_FRAME_ID;
 
 	/* Initialize the frame interface */
+	if (drvdata->quirks & UCLOGIC_MOUSE_FRAME_QUIRK)
+		frame_type = UCLOGIC_PARAMS_FRAME_MOUSE;
+
 	switch (frame_type) {
 	case UCLOGIC_PARAMS_FRAME_DIAL:
 	case UCLOGIC_PARAMS_FRAME_MOUSE:
@@ -1334,11 +1504,147 @@ static int uclogic_params_ugee_v2_init(struct uclogic_params *params,
 	if (rc)
 		goto cleanup;
 
+	/* Initialize the battery interface*/
+	if (uclogic_params_ugee_v2_has_battery(hdev)) {
+		rc = uclogic_params_ugee_v2_init_battery(hdev, &p);
+		if (rc) {
+			hid_err(hdev, "error initializing battery: %d\n", rc);
+			goto cleanup;
+		}
+	}
+
+	/* Create a list of raw events to be ignored */
+	rc = uclogic_params_ugee_v2_init_event_hooks(hdev, &p);
+	if (rc) {
+		hid_err(hdev, "error initializing event hook list: %d\n", rc);
+		goto cleanup;
+	}
+
 output:
 	/* Output parameters */
 	memcpy(params, &p, sizeof(*params));
 	memset(&p, 0, sizeof(p));
 	rc = 0;
+cleanup:
+	kfree(str_desc);
+	uclogic_params_cleanup(&p);
+	return rc;
+}
+
+/*
+ * uclogic_params_init_ugee_xppen_pro_22r() - Initializes a UGEE XP-Pen Pro 22R tablet device.
+ *
+ * @hdev:	The HID device of the tablet interface to initialize and get
+ *		parameters from. Cannot be NULL.
+ * @params:	Parameters to fill in (to be cleaned with
+ *		uclogic_params_cleanup()). Not modified in case of error.
+ *		Cannot be NULL.
+ *
+ * Returns:
+ *	Zero, if successful. A negative errno code on error.
+ */
+static int uclogic_params_init_ugee_xppen_pro_22r(struct uclogic_params *params,
+						  struct hid_device *hdev,
+						  const u8 rdesc_frame_arr[],
+						  const size_t rdesc_frame_size)
+{
+	int rc = 0;
+	struct usb_interface *iface;
+	__u8 bInterfaceNumber;
+	const int str_desc_len = 12;
+	u8 *str_desc = NULL;
+	__u8 *rdesc_pen = NULL;
+	s32 desc_params[UCLOGIC_RDESC_PH_ID_NUM];
+	enum uclogic_params_frame_type frame_type;
+	/* The resulting parameters (noop) */
+	struct uclogic_params p = {0, };
+
+	if (!hdev || !params) {
+		rc = -EINVAL;
+		goto cleanup;
+	}
+
+	iface = to_usb_interface(hdev->dev.parent);
+	bInterfaceNumber = iface->cur_altsetting->desc.bInterfaceNumber;
+
+	/* Ignore non-pen interfaces */
+	if (bInterfaceNumber != 2) {
+		rc = -EINVAL;
+		uclogic_params_init_invalid(&p);
+		goto cleanup;
+	}
+
+	/*
+	 * Initialize the interface by sending magic data.
+	 * This magic data is the same as other UGEE v2 tablets.
+	 */
+	rc = uclogic_probe_interface(hdev,
+				     uclogic_ugee_v2_probe_arr,
+				     uclogic_ugee_v2_probe_size,
+				     uclogic_ugee_v2_probe_endpoint);
+	if (rc) {
+		uclogic_params_init_invalid(&p);
+		goto cleanup;
+	}
+
+	/**
+	 * Read the string descriptor containing pen and frame parameters.
+	 * These are slightly different than typical UGEE v2 devices.
+	 */
+	rc = uclogic_params_get_str_desc(&str_desc, hdev, 100, str_desc_len);
+	if (rc != str_desc_len) {
+		rc = (rc < 0) ? rc : -EINVAL;
+		hid_err(hdev, "failed retrieving pen and frame parameters: %d\n", rc);
+		uclogic_params_init_invalid(&p);
+		goto cleanup;
+	}
+
+	rc = uclogic_params_parse_ugee_v2_desc(str_desc, str_desc_len,
+					       desc_params,
+					       ARRAY_SIZE(desc_params),
+					       &frame_type);
+	if (rc)
+		goto cleanup;
+
+	// str_desc doesn't report the correct amount of buttons, so manually fix it
+	desc_params[UCLOGIC_RDESC_FRAME_PH_ID_UM] = 20;
+
+	kfree(str_desc);
+	str_desc = NULL;
+
+	/* Initialize the pen interface */
+	rdesc_pen = uclogic_rdesc_template_apply(
+				uclogic_rdesc_ugee_v2_pen_template_arr,
+				uclogic_rdesc_ugee_v2_pen_template_size,
+				desc_params, ARRAY_SIZE(desc_params));
+	if (!rdesc_pen) {
+		rc = -ENOMEM;
+		goto cleanup;
+	}
+
+	p.pen.desc_ptr = rdesc_pen;
+	p.pen.desc_size = uclogic_rdesc_ugee_v2_pen_template_size;
+	p.pen.id = 0x02;
+	p.pen.subreport_list[0].value = 0xf0;
+	p.pen.subreport_list[0].id = UCLOGIC_RDESC_V1_FRAME_ID;
+
+	/* Initialize the frame interface */
+	rc = uclogic_params_frame_init_with_desc(
+		&p.frame_list[0],
+		rdesc_frame_arr,
+		rdesc_frame_size,
+		UCLOGIC_RDESC_V1_FRAME_ID);
+	if (rc < 0) {
+		hid_err(hdev, "initializing frame params failed: %d\n", rc);
+		goto cleanup;
+	}
+
+	p.frame_list[0].bitmap_dial_byte = 7;
+	p.frame_list[0].bitmap_second_dial_destination_byte = 8;
+
+	/* Output parameters */
+	memcpy(params, &p, sizeof(*params));
+	memset(&p, 0, sizeof(p));
 cleanup:
 	kfree(str_desc);
 	uclogic_params_cleanup(&p);
@@ -1583,9 +1889,15 @@ int uclogic_params_init(struct uclogic_params *params,
 	case VID_PID(USB_VENDOR_ID_UGEE,
 		     USB_DEVICE_ID_UGEE_PARBLO_A610_PRO):
 	case VID_PID(USB_VENDOR_ID_UGEE,
+		     USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO01_V2):
+	case VID_PID(USB_VENDOR_ID_UGEE,
 		     USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO_L):
 	case VID_PID(USB_VENDOR_ID_UGEE,
+		     USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO_PRO_MW):
+	case VID_PID(USB_VENDOR_ID_UGEE,
 		     USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO_PRO_S):
+	case VID_PID(USB_VENDOR_ID_UGEE,
+		     USB_DEVICE_ID_UGEE_XPPEN_TABLET_DECO_PRO_SW):
 		rc = uclogic_params_ugee_v2_init(&p, hdev);
 		if (rc != 0)
 			goto cleanup;
@@ -1654,6 +1966,16 @@ int uclogic_params_init(struct uclogic_params *params,
 			hid_warn(hdev, "pen parameters not found");
 			uclogic_params_init_invalid(&p);
 		}
+
+		break;
+	case VID_PID(USB_VENDOR_ID_UGEE,
+			USB_DEVICE_ID_UGEE_XPPEN_TABLET_22R_PRO):
+		rc = uclogic_params_init_ugee_xppen_pro_22r(&p,
+			hdev,
+			uclogic_rdesc_xppen_artist_22r_pro_frame_arr,
+			uclogic_rdesc_xppen_artist_22r_pro_frame_size);
+		if (rc != 0)
+			goto cleanup;
 
 		break;
 	}

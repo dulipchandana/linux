@@ -1559,8 +1559,6 @@ static const struct vb2_ops delta_vb2_au_ops = {
 	.queue_setup = delta_vb2_au_queue_setup,
 	.buf_prepare = delta_vb2_au_prepare,
 	.buf_queue = delta_vb2_au_queue,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 	.start_streaming = delta_vb2_au_start_streaming,
 	.stop_streaming = delta_vb2_au_stop_streaming,
 };
@@ -1570,8 +1568,6 @@ static const struct vb2_ops delta_vb2_frame_ops = {
 	.buf_prepare = delta_vb2_frame_prepare,
 	.buf_finish = delta_vb2_frame_finish,
 	.buf_queue = delta_vb2_frame_queue,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 	.stop_streaming = delta_vb2_frame_stop_streaming,
 };
 
@@ -1900,7 +1896,7 @@ err:
 	return ret;
 }
 
-static int delta_remove(struct platform_device *pdev)
+static void delta_remove(struct platform_device *pdev)
 {
 	struct delta_dev *delta = platform_get_drvdata(pdev);
 
@@ -1914,8 +1910,6 @@ static int delta_remove(struct platform_device *pdev)
 	pm_runtime_disable(delta->dev);
 
 	v4l2_device_unregister(&delta->v4l2_dev);
-
-	return 0;
 }
 
 static int delta_runtime_suspend(struct device *dev)

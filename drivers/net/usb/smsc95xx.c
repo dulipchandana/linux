@@ -63,9 +63,13 @@ struct smsc95xx_priv {
 	u32 hash_hi;
 	u32 hash_lo;
 	u32 wolopts;
+	bool pause_rx;
+	bool pause_tx;
+	bool pause_autoneg;
 	spinlock_t mac_cr_lock;
 	u8 features;
 	u8 suspend_flags;
+	bool is_internal_phy;
 	struct irq_chip irqchip;
 	struct irq_domain *irqdomain;
 	struct fwnode_handle *irqfwnode;
@@ -94,7 +98,9 @@ static int __must_check smsc95xx_read_reg(struct usbnet *dev, u32 index,
 	ret = fn(dev, USB_VENDOR_REQUEST_READ_REGISTER, USB_DIR_IN
 		 | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 		 0, index, &buf, 4);
-	if (ret < 0) {
+	if (ret < 4) {
+		ret = ret < 0 ? ret : -ENODATA;
+
 		if (ret != -ENODEV)
 			netdev_warn(dev->net, "Failed to read reg index 0x%08x: %d\n",
 				    index, ret);
@@ -250,6 +256,43 @@ static void smsc95xx_mdio_write(struct usbnet *dev, int phy_id, int idx,
 
 done:
 	mutex_unlock(&dev->phy_mutex);
+}
+
+static int smsc95xx_mdiobus_reset(struct mii_bus *bus)
+{
+	struct smsc95xx_priv *pdata;
+	struct usbnet *dev;
+	u32 val;
+	int ret;
+
+	dev = bus->priv;
+	pdata = dev->driver_priv;
+
+	if (pdata->is_internal_phy)
+		return 0;
+
+	mutex_lock(&dev->phy_mutex);
+
+	ret = smsc95xx_read_reg(dev, PM_CTRL, &val);
+	if (ret < 0)
+		goto reset_out;
+
+	val |= PM_CTL_PHY_RST_;
+
+	ret = smsc95xx_write_reg(dev, PM_CTRL, val);
+	if (ret < 0)
+		goto reset_out;
+
+	/* Driver has no knowledge at this point about the external PHY.
+	 * The 802.3 specifies that the reset process shall
+	 * be completed within 0.5 s.
+	 */
+	fsleep(500000);
+
+reset_out:
+	mutex_unlock(&dev->phy_mutex);
+
+	return 0;
 }
 
 static int smsc95xx_mdiobus_read(struct mii_bus *bus, int phy_id, int idx)
@@ -497,16 +540,23 @@ static void smsc95xx_set_multicast(struct net_device *netdev)
 
 static int smsc95xx_phy_update_flowcontrol(struct usbnet *dev)
 {
-	u32 flow = 0, afc_cfg;
 	struct smsc95xx_priv *pdata = dev->driver_priv;
-	bool tx_pause, rx_pause;
+	u32 flow = 0, afc_cfg;
 
 	int ret = smsc95xx_read_reg(dev, AFC_CFG, &afc_cfg);
 	if (ret < 0)
 		return ret;
 
 	if (pdata->phydev->duplex == DUPLEX_FULL) {
-		phy_get_pause(pdata->phydev, &tx_pause, &rx_pause);
+		bool tx_pause, rx_pause;
+
+		if (pdata->phydev->autoneg == AUTONEG_ENABLE &&
+		    pdata->pause_autoneg) {
+			phy_get_pause(pdata->phydev, &tx_pause, &rx_pause);
+		} else {
+			tx_pause = pdata->pause_tx;
+			rx_pause = pdata->pause_rx;
+		}
 
 		if (rx_pause)
 			flow = 0xFFFF0002;
@@ -732,6 +782,55 @@ static int smsc95xx_ethtool_get_sset_count(struct net_device *ndev, int sset)
 	}
 }
 
+static void smsc95xx_get_pauseparam(struct net_device *ndev,
+				    struct ethtool_pauseparam *pause)
+{
+	struct smsc95xx_priv *pdata;
+	struct usbnet *dev;
+
+	dev = netdev_priv(ndev);
+	pdata = dev->driver_priv;
+
+	pause->autoneg = pdata->pause_autoneg;
+	pause->rx_pause = pdata->pause_rx;
+	pause->tx_pause = pdata->pause_tx;
+}
+
+static int smsc95xx_set_pauseparam(struct net_device *ndev,
+				   struct ethtool_pauseparam *pause)
+{
+	bool pause_autoneg_rx, pause_autoneg_tx;
+	struct smsc95xx_priv *pdata;
+	struct phy_device *phydev;
+	struct usbnet *dev;
+
+	dev = netdev_priv(ndev);
+	pdata = dev->driver_priv;
+	phydev = ndev->phydev;
+
+	if (!phydev)
+		return -ENODEV;
+
+	pdata->pause_rx = pause->rx_pause;
+	pdata->pause_tx = pause->tx_pause;
+	pdata->pause_autoneg = pause->autoneg;
+
+	if (pause->autoneg) {
+		pause_autoneg_rx = pause->rx_pause;
+		pause_autoneg_tx = pause->tx_pause;
+	} else {
+		pause_autoneg_rx = false;
+		pause_autoneg_tx = false;
+	}
+
+	phy_set_asym_pause(ndev->phydev, pause_autoneg_rx, pause_autoneg_tx);
+	if (phydev->link && (!pause->autoneg ||
+			     phydev->autoneg == AUTONEG_DISABLE))
+		smsc95xx_mac_update_fullduplex(dev);
+
+	return 0;
+}
+
 static const struct ethtool_ops smsc95xx_ethtool_ops = {
 	.get_link	= smsc95xx_get_link,
 	.nway_reset	= phy_ethtool_nway_reset,
@@ -751,6 +850,8 @@ static const struct ethtool_ops smsc95xx_ethtool_ops = {
 	.self_test	= net_selftest,
 	.get_strings	= smsc95xx_ethtool_get_strings,
 	.get_sset_count	= smsc95xx_ethtool_get_sset_count,
+	.get_pauseparam	= smsc95xx_get_pauseparam,
+	.set_pauseparam	= smsc95xx_set_pauseparam,
 };
 
 static int smsc95xx_ioctl(struct net_device *netdev, struct ifreq *rq, int cmd)
@@ -839,7 +940,7 @@ static int smsc95xx_start_rx_path(struct usbnet *dev)
 static int smsc95xx_reset(struct usbnet *dev)
 {
 	struct smsc95xx_priv *pdata = dev->driver_priv;
-	u32 read_buf, write_buf, burst_cap;
+	u32 read_buf, burst_cap;
 	int ret = 0, timeout;
 
 	netif_dbg(dev, ifup, dev->net, "entering smsc95xx_reset\n");
@@ -859,7 +960,7 @@ static int smsc95xx_reset(struct usbnet *dev)
 
 	if (timeout >= 100) {
 		netdev_warn(dev->net, "timeout waiting for completion of Lite Reset\n");
-		return ret;
+		return -ETIMEDOUT;
 	}
 
 	ret = smsc95xx_set_mac_address(dev);
@@ -963,10 +1064,13 @@ static int smsc95xx_reset(struct usbnet *dev)
 		return ret;
 	netif_dbg(dev, ifup, dev->net, "ID_REV = 0x%08x\n", read_buf);
 
+	ret = smsc95xx_read_reg(dev, LED_GPIO_CFG, &read_buf);
+	if (ret < 0)
+		return ret;
 	/* Configure GPIO pins as LED outputs */
-	write_buf = LED_GPIO_CFG_SPD_LED | LED_GPIO_CFG_LNK_LED |
-		LED_GPIO_CFG_FDX_LED;
-	ret = smsc95xx_write_reg(dev, LED_GPIO_CFG, write_buf);
+	read_buf |= LED_GPIO_CFG_SPD_LED | LED_GPIO_CFG_LNK_LED |
+		    LED_GPIO_CFG_FDX_LED;
+	ret = smsc95xx_write_reg(dev, LED_GPIO_CFG, read_buf);
 	if (ret < 0)
 		return ret;
 
@@ -1052,7 +1156,6 @@ static void smsc95xx_handle_link_change(struct net_device *net)
 static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	struct smsc95xx_priv *pdata;
-	bool is_internal_phy;
 	char usb_path[64];
 	int ret, phy_irq;
 	u32 val;
@@ -1133,13 +1236,14 @@ static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 	if (ret < 0)
 		goto free_mdio;
 
-	is_internal_phy = !(val & HW_CFG_PSEL_);
-	if (is_internal_phy)
+	pdata->is_internal_phy = !(val & HW_CFG_PSEL_);
+	if (pdata->is_internal_phy)
 		pdata->mdiobus->phy_mask = ~(1u << SMSC95XX_INTERNAL_PHY_ID);
 
 	pdata->mdiobus->priv = dev;
 	pdata->mdiobus->read = smsc95xx_mdiobus_read;
 	pdata->mdiobus->write = smsc95xx_mdiobus_write;
+	pdata->mdiobus->reset = smsc95xx_mdiobus_reset;
 	pdata->mdiobus->name = "smsc95xx-mdiobus";
 	pdata->mdiobus->parent = &dev->udev->dev;
 
@@ -1160,7 +1264,7 @@ static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 	}
 
 	pdata->phydev->irq = phy_irq;
-	pdata->phydev->is_internal = is_internal_phy;
+	pdata->phydev->is_internal = pdata->is_internal_phy;
 
 	/* detect device revision as different features may be available */
 	ret = smsc95xx_read_reg(dev, ID_REV, &val);
@@ -1183,6 +1287,11 @@ static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 	dev->net->min_mtu = ETH_MIN_MTU;
 	dev->net->max_mtu = ETH_DATA_LEN;
 	dev->hard_mtu = dev->net->mtu + dev->net->hard_header_len;
+
+	pdata->pause_tx = true;
+	pdata->pause_rx = true;
+	pdata->pause_autoneg = true;
+	phy_support_asym_pause(pdata->phydev);
 
 	ret = phy_connect_direct(dev->net, pdata->phydev,
 				 &smsc95xx_handle_link_change,
@@ -1770,9 +1879,11 @@ static int smsc95xx_reset_resume(struct usb_interface *intf)
 
 static void smsc95xx_rx_csum_offload(struct sk_buff *skb)
 {
-	skb->csum = *(u16 *)(skb_tail_pointer(skb) - 2);
+	u16 *csum_ptr = (u16 *)(skb_tail_pointer(skb) - 2);
+
+	skb->csum = (__force __wsum)get_unaligned(csum_ptr);
 	skb->ip_summed = CHECKSUM_COMPLETE;
-	skb_trim(skb, skb->len - 2);
+	skb_trim(skb, skb->len - 2); /* remove csum */
 }
 
 static int smsc95xx_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
@@ -1794,6 +1905,12 @@ static int smsc95xx_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		/* get the packet length */
 		size = (u16)((header & RX_STS_FL_) >> 16);
 		align_count = (4 - ((size + NET_IP_ALIGN) % 4)) % 4;
+
+		if (unlikely(size > skb->len)) {
+			netif_dbg(dev, rx_err, dev->net,
+				  "size err header=0x%08x\n", header);
+			return 0;
+		}
 
 		if (unlikely(header & RX_STS_ES_)) {
 			netif_dbg(dev, rx_err, dev->net,
@@ -1824,25 +1941,22 @@ static int smsc95xx_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 				if (dev->net->features & NETIF_F_RXCSUM)
 					smsc95xx_rx_csum_offload(skb);
 				skb_trim(skb, skb->len - 4); /* remove fcs */
-				skb->truesize = size + sizeof(struct sk_buff);
 
 				return 1;
 			}
 
-			ax_skb = skb_clone(skb, GFP_ATOMIC);
+			ax_skb = netdev_alloc_skb_ip_align(dev->net, size);
 			if (unlikely(!ax_skb)) {
 				netdev_warn(dev->net, "Error allocating skb\n");
 				return 0;
 			}
 
-			ax_skb->len = size;
-			ax_skb->data = packet;
-			skb_set_tail_pointer(ax_skb, size);
+			skb_put(ax_skb, size);
+			memcpy(ax_skb->data, packet, size);
 
 			if (dev->net->features & NETIF_F_RXCSUM)
 				smsc95xx_rx_csum_offload(ax_skb);
 			skb_trim(ax_skb, ax_skb->len - 4); /* remove fcs */
-			ax_skb->truesize = size + sizeof(struct sk_buff);
 
 			usbnet_skb_return(dev, ax_skb);
 		}
@@ -2057,6 +2171,11 @@ static const struct usb_device_id products[] = {
 		/* SMSC LAN89530 USB Ethernet Device */
 		USB_DEVICE(0x0424, 0x9E08),
 		.driver_info = (unsigned long) &smsc95xx_info,
+	},
+	{
+		/* SYSTEC USB-SPEmodule1 10BASE-T1L Ethernet Device */
+		USB_DEVICE(0x0878, 0x1400),
+		.driver_info = (unsigned long)&smsc95xx_info,
 	},
 	{
 		/* Microchip's EVB-LAN8670-USB 10BASE-T1S Ethernet Device */

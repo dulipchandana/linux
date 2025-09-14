@@ -73,6 +73,14 @@ static inline void *kmap_local_page(struct page *page)
 	return __kmap_local_page_prot(page, kmap_prot);
 }
 
+static inline void *kmap_local_page_try_from_panic(struct page *page)
+{
+	if (!PageHighMem(page))
+		return page_address(page);
+	/* If the page is in HighMem, it's not safe to kmap it.*/
+	return NULL;
+}
+
 static inline void *kmap_local_folio(struct folio *folio, size_t offset)
 {
 	struct page *page = folio_page(folio, offset / PAGE_SIZE);
@@ -131,28 +139,26 @@ static inline void __kunmap_atomic(const void *addr)
 		preempt_enable();
 }
 
-unsigned int __nr_free_highpages(void);
-extern atomic_long_t _totalhigh_pages;
+unsigned long __nr_free_highpages(void);
+unsigned long __totalhigh_pages(void);
 
-static inline unsigned int nr_free_highpages(void)
+static inline unsigned long nr_free_highpages(void)
 {
 	return __nr_free_highpages();
 }
 
 static inline unsigned long totalhigh_pages(void)
 {
-	return (unsigned long)atomic_long_read(&_totalhigh_pages);
-}
-
-static inline void totalhigh_pages_add(long count)
-{
-	atomic_long_add(count, &_totalhigh_pages);
+	return __totalhigh_pages();
 }
 
 static inline bool is_kmap_addr(const void *x)
 {
 	unsigned long addr = (unsigned long)x;
-	return addr >= PKMAP_ADDR(0) && addr < PKMAP_ADDR(LAST_PKMAP);
+
+	return (addr >= PKMAP_ADDR(0) && addr < PKMAP_ADDR(LAST_PKMAP)) ||
+		(addr >= __fix_to_virt(FIX_KMAP_END) &&
+		 addr < __fix_to_virt(FIX_KMAP_BEGIN));
 }
 #else /* CONFIG_HIGHMEM */
 
@@ -182,9 +188,14 @@ static inline void *kmap_local_page(struct page *page)
 	return page_address(page);
 }
 
+static inline void *kmap_local_page_try_from_panic(struct page *page)
+{
+	return page_address(page);
+}
+
 static inline void *kmap_local_folio(struct folio *folio, size_t offset)
 {
-	return page_address(&folio->page) + offset;
+	return folio_address(folio) + offset;
 }
 
 static inline void *kmap_local_page_prot(struct page *page, pgprot_t prot)
@@ -200,7 +211,7 @@ static inline void *kmap_local_pfn(unsigned long pfn)
 static inline void __kunmap_local(const void *addr)
 {
 #ifdef ARCH_HAS_FLUSH_ON_KUNMAP
-	kunmap_flush_on_unmap(addr);
+	kunmap_flush_on_unmap(PTR_ALIGN_DOWN(addr, PAGE_SIZE));
 #endif
 }
 
@@ -227,7 +238,7 @@ static inline void *kmap_atomic_pfn(unsigned long pfn)
 static inline void __kunmap_atomic(const void *addr)
 {
 #ifdef ARCH_HAS_FLUSH_ON_KUNMAP
-	kunmap_flush_on_unmap(addr);
+	kunmap_flush_on_unmap(PTR_ALIGN_DOWN(addr, PAGE_SIZE));
 #endif
 	pagefault_enable();
 	if (IS_ENABLED(CONFIG_PREEMPT_RT))
@@ -236,8 +247,8 @@ static inline void __kunmap_atomic(const void *addr)
 		preempt_enable();
 }
 
-static inline unsigned int nr_free_highpages(void) { return 0; }
-static inline unsigned long totalhigh_pages(void) { return 0UL; }
+static inline unsigned long nr_free_highpages(void) { return 0; }
+static inline unsigned long totalhigh_pages(void) { return 0; }
 
 static inline bool is_kmap_addr(const void *x)
 {

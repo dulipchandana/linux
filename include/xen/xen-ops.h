@@ -30,13 +30,11 @@ void xen_arch_suspend(void);
 void xen_reboot(int reason);
 
 void xen_resume_notifier_register(struct notifier_block *nb);
-void xen_resume_notifier_unregister(struct notifier_block *nb);
 
 bool xen_vcpu_stolen(int vcpu);
 void xen_setup_runstate_info(int cpu);
 void xen_time_setup_guest(void);
 void xen_manage_runstate_time(int action);
-void xen_get_runstate_snapshot(struct vcpu_runstate_info *res);
 u64 xen_steal_clock(int cpu);
 
 int xen_setup_shutdown_event(void);
@@ -216,25 +214,9 @@ static inline void xen_preemptible_hcall_end(void) { }
 #endif /* CONFIG_XEN_PV && !CONFIG_PREEMPTION */
 
 #ifdef CONFIG_XEN_GRANT_DMA_OPS
-void xen_grant_setup_dma_ops(struct device *dev);
-bool xen_is_grant_dma_device(struct device *dev);
-bool xen_virtio_mem_acc(struct virtio_device *dev);
 bool xen_virtio_restricted_mem_acc(struct virtio_device *dev);
 #else
-static inline void xen_grant_setup_dma_ops(struct device *dev)
-{
-}
-static inline bool xen_is_grant_dma_device(struct device *dev)
-{
-	return false;
-}
-
 struct virtio_device;
-
-static inline bool xen_virtio_mem_acc(struct virtio_device *dev)
-{
-	return false;
-}
 
 static inline bool xen_virtio_restricted_mem_acc(struct virtio_device *dev)
 {

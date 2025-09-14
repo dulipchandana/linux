@@ -37,7 +37,7 @@ struct adc081c {
 	/* Ensure natural alignment of buffer elements */
 	struct {
 		u16 channel;
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -140,8 +140,8 @@ static irqreturn_t adc081c_trigger_handler(int irq, void *p)
 	if (ret < 0)
 		goto out;
 	data->scan.channel = ret;
-	iio_push_to_buffers_with_timestamp(indio_dev, &data->scan,
-					   iio_get_time_ns(indio_dev));
+	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
+				    iio_get_time_ns(indio_dev));
 out:
 	iio_trigger_notify_done(indio_dev->trig);
 	return IRQ_HANDLED;
@@ -152,8 +152,7 @@ static void adc081c_reg_disable(void *reg)
 	regulator_disable(reg);
 }
 
-static int adc081c_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int adc081c_probe(struct i2c_client *client)
 {
 	struct iio_dev *iio;
 	struct adc081c *adc;
@@ -163,10 +162,7 @@ static int adc081c_probe(struct i2c_client *client,
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_WORD_DATA))
 		return -EOPNOTSUPP;
 
-	if (dev_fwnode(&client->dev))
-		model = device_get_match_data(&client->dev);
-	else
-		model = &adcxx1c_models[id->driver_data];
+	model = i2c_get_match_data(client);
 
 	iio = devm_iio_device_alloc(&client->dev, sizeof(*adc));
 	if (!iio)
@@ -207,9 +203,9 @@ static int adc081c_probe(struct i2c_client *client,
 }
 
 static const struct i2c_device_id adc081c_id[] = {
-	{ "adc081c", ADC081C },
-	{ "adc101c", ADC101C },
-	{ "adc121c", ADC121C },
+	{ "adc081c", (kernel_ulong_t)&adcxx1c_models[ADC081C] },
+	{ "adc101c", (kernel_ulong_t)&adcxx1c_models[ADC101C] },
+	{ "adc121c", (kernel_ulong_t)&adcxx1c_models[ADC121C] },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adc081c_id);

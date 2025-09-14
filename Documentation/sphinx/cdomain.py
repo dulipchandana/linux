@@ -1,6 +1,7 @@
 # -*- coding: utf-8; mode: python -*-
+# SPDX-License-Identifier: GPL-2.0
 # pylint: disable=W0141,C0113,C0103,C0325
-u"""
+"""
     cdomain
     ~~~~~~~
 
@@ -44,9 +45,6 @@ from itertools import chain
 import re
 
 __version__  = '1.1'
-
-# Get Sphinx version
-major, minor, patch = sphinx.version_info[:3]
 
 # Namespace to be prepended to the full name
 namespace = None
@@ -93,7 +91,7 @@ def markup_ctype_refs(match):
 #
 RE_expr = re.compile(r':c:(expr|texpr):`([^\`]+)`')
 def markup_c_expr(match):
-    return '\ ``' + match.group(2) + '``\ '
+    return '\\ ``' + match.group(2) + '``\\ '
 
 #
 # Parse Sphinx 3.x C markups, replacing them by backward-compatible ones
@@ -127,11 +125,7 @@ def setup(app):
 
     # Handle easy Sphinx 3.1+ simple new tags: :c:expr and .. c:namespace::
     app.connect('source-read', c_markups)
-
-    if (major == 1 and minor < 8):
-        app.override_domain(CDomain)
-    else:
-        app.add_domain(CDomain, override=True)
+    app.add_domain(CDomain, override=True)
 
     return dict(
         version = __version__,
@@ -149,9 +143,9 @@ class CObject(Base_CObject):
     }
 
     def handle_func_like_macro(self, sig, signode):
-        u"""Handles signatures of function-like macros.
+        """Handles signatures of function-like macros.
 
-        If the objtype is 'function' and the the signature ``sig`` is a
+        If the objtype is 'function' and the signature ``sig`` is a
         function-like macro, the name of the macro is returned. Otherwise
         ``False`` is returned.  """
 
@@ -178,7 +172,7 @@ class CObject(Base_CObject):
         if len(arglist[0].split(" ")) > 1:
             return False
 
-        # This is a function-like macro, it's arguments are typeless!
+        # This is a function-like macro, its arguments are typeless!
         signode  += addnodes.desc_name(fullname, fullname)
         paramlist = addnodes.desc_parameterlist()
         signode  += paramlist

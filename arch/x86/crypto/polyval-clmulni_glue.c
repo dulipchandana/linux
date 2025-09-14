@@ -16,63 +16,61 @@
  * operations.
  */
 
-#include <crypto/algapi.h>
+#include <asm/cpu_device_id.h>
+#include <asm/fpu/api.h>
 #include <crypto/internal/hash.h>
-#include <crypto/internal/simd.h>
 #include <crypto/polyval.h>
-#include <linux/crypto.h>
-#include <linux/init.h>
+#include <crypto/utils.h>
+#include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <asm/cpu_device_id.h>
-#include <asm/simd.h>
+#include <linux/string.h>
 
+#define POLYVAL_ALIGN	16
+#define POLYVAL_ALIGN_ATTR __aligned(POLYVAL_ALIGN)
+#define POLYVAL_ALIGN_EXTRA ((POLYVAL_ALIGN - 1) & ~(CRYPTO_MINALIGN - 1))
+#define POLYVAL_CTX_SIZE (sizeof(struct polyval_tfm_ctx) + POLYVAL_ALIGN_EXTRA)
 #define NUM_KEY_POWERS	8
 
 struct polyval_tfm_ctx {
 	/*
 	 * These powers must be in the order h^8, ..., h^1.
 	 */
-	u8 key_powers[NUM_KEY_POWERS][POLYVAL_BLOCK_SIZE];
+	u8 key_powers[NUM_KEY_POWERS][POLYVAL_BLOCK_SIZE] POLYVAL_ALIGN_ATTR;
 };
 
 struct polyval_desc_ctx {
 	u8 buffer[POLYVAL_BLOCK_SIZE];
-	u32 bytes;
 };
 
 asmlinkage void clmul_polyval_update(const struct polyval_tfm_ctx *keys,
 	const u8 *in, size_t nblocks, u8 *accumulator);
 asmlinkage void clmul_polyval_mul(u8 *op1, const u8 *op2);
 
+static inline struct polyval_tfm_ctx *polyval_tfm_ctx(struct crypto_shash *tfm)
+{
+	return PTR_ALIGN(crypto_shash_ctx(tfm), POLYVAL_ALIGN);
+}
+
 static void internal_polyval_update(const struct polyval_tfm_ctx *keys,
 	const u8 *in, size_t nblocks, u8 *accumulator)
 {
-	if (likely(crypto_simd_usable())) {
-		kernel_fpu_begin();
-		clmul_polyval_update(keys, in, nblocks, accumulator);
-		kernel_fpu_end();
-	} else {
-		polyval_update_non4k(keys->key_powers[NUM_KEY_POWERS-1], in,
-			nblocks, accumulator);
-	}
+	kernel_fpu_begin();
+	clmul_polyval_update(keys, in, nblocks, accumulator);
+	kernel_fpu_end();
 }
 
 static void internal_polyval_mul(u8 *op1, const u8 *op2)
 {
-	if (likely(crypto_simd_usable())) {
-		kernel_fpu_begin();
-		clmul_polyval_mul(op1, op2);
-		kernel_fpu_end();
-	} else {
-		polyval_mul_non4k(op1, op2);
-	}
+	kernel_fpu_begin();
+	clmul_polyval_mul(op1, op2);
+	kernel_fpu_end();
 }
 
 static int polyval_x86_setkey(struct crypto_shash *tfm,
 			const u8 *key, unsigned int keylen)
 {
-	struct polyval_tfm_ctx *tctx = crypto_shash_ctx(tfm);
+	struct polyval_tfm_ctx *tctx = polyval_tfm_ctx(tfm);
 	int i;
 
 	if (keylen != POLYVAL_BLOCK_SIZE)
@@ -102,50 +100,28 @@ static int polyval_x86_update(struct shash_desc *desc,
 			 const u8 *src, unsigned int srclen)
 {
 	struct polyval_desc_ctx *dctx = shash_desc_ctx(desc);
-	const struct polyval_tfm_ctx *tctx = crypto_shash_ctx(desc->tfm);
-	u8 *pos;
+	const struct polyval_tfm_ctx *tctx = polyval_tfm_ctx(desc->tfm);
 	unsigned int nblocks;
-	unsigned int n;
 
-	if (dctx->bytes) {
-		n = min(srclen, dctx->bytes);
-		pos = dctx->buffer + POLYVAL_BLOCK_SIZE - dctx->bytes;
-
-		dctx->bytes -= n;
-		srclen -= n;
-
-		while (n--)
-			*pos++ ^= *src++;
-
-		if (!dctx->bytes)
-			internal_polyval_mul(dctx->buffer,
-					    tctx->key_powers[NUM_KEY_POWERS-1]);
-	}
-
-	while (srclen >= POLYVAL_BLOCK_SIZE) {
+	do {
 		/* Allow rescheduling every 4K bytes. */
 		nblocks = min(srclen, 4096U) / POLYVAL_BLOCK_SIZE;
 		internal_polyval_update(tctx, src, nblocks, dctx->buffer);
 		srclen -= nblocks * POLYVAL_BLOCK_SIZE;
 		src += nblocks * POLYVAL_BLOCK_SIZE;
-	}
+	} while (srclen >= POLYVAL_BLOCK_SIZE);
 
-	if (srclen) {
-		dctx->bytes = POLYVAL_BLOCK_SIZE - srclen;
-		pos = dctx->buffer;
-		while (srclen--)
-			*pos++ ^= *src++;
-	}
-
-	return 0;
+	return srclen;
 }
 
-static int polyval_x86_final(struct shash_desc *desc, u8 *dst)
+static int polyval_x86_finup(struct shash_desc *desc, const u8 *src,
+			     unsigned int len, u8 *dst)
 {
 	struct polyval_desc_ctx *dctx = shash_desc_ctx(desc);
-	const struct polyval_tfm_ctx *tctx = crypto_shash_ctx(desc->tfm);
+	const struct polyval_tfm_ctx *tctx = polyval_tfm_ctx(desc->tfm);
 
-	if (dctx->bytes) {
+	if (len) {
+		crypto_xor(dctx->buffer, src, len);
 		internal_polyval_mul(dctx->buffer,
 				     tctx->key_powers[NUM_KEY_POWERS-1]);
 	}
@@ -159,15 +135,16 @@ static struct shash_alg polyval_alg = {
 	.digestsize	= POLYVAL_DIGEST_SIZE,
 	.init		= polyval_x86_init,
 	.update		= polyval_x86_update,
-	.final		= polyval_x86_final,
+	.finup		= polyval_x86_finup,
 	.setkey		= polyval_x86_setkey,
 	.descsize	= sizeof(struct polyval_desc_ctx),
 	.base		= {
 		.cra_name		= "polyval",
 		.cra_driver_name	= "polyval-clmulni",
 		.cra_priority		= 200,
+		.cra_flags		= CRYPTO_AHASH_ALG_BLOCK_ONLY,
 		.cra_blocksize		= POLYVAL_BLOCK_SIZE,
-		.cra_ctxsize		= sizeof(struct polyval_tfm_ctx),
+		.cra_ctxsize		= POLYVAL_CTX_SIZE,
 		.cra_module		= THIS_MODULE,
 	},
 };

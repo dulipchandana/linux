@@ -245,6 +245,7 @@ static int debug;
 static int ulaw;
 
 MODULE_AUTHOR("Andreas Eversberg");
+MODULE_DESCRIPTION("mISDN driver for tunneling layer 1 over IP");
 MODULE_LICENSE("GPL");
 module_param_array(type, uint, NULL, S_IRUGO | S_IWUSR);
 module_param_array(codec, uint, NULL, S_IRUGO | S_IWUSR);
@@ -706,7 +707,7 @@ l1oip_socket_thread(void *data)
 		printk(KERN_DEBUG "%s: socket created and open\n",
 		       __func__);
 	while (!signal_pending(current)) {
-		iov_iter_kvec(&msg.msg_iter, READ, &iov, 1, recvbuf_size);
+		iov_iter_kvec(&msg.msg_iter, ITER_DEST, &iov, 1, recvbuf_size);
 		recvlen = sock_recvmsg(socket, &msg, 0);
 		if (recvlen > 0) {
 			l1oip_socket_parse(hc, &sin_rx, recvbuf, recvlen);
@@ -821,7 +822,7 @@ l1oip_send_bh(struct work_struct *work)
 static void
 l1oip_keepalive(struct timer_list *t)
 {
-	struct l1oip *hc = from_timer(hc, t, keep_tl);
+	struct l1oip *hc = timer_container_of(hc, t, keep_tl);
 
 	schedule_work(&hc->workq);
 }
@@ -829,8 +830,8 @@ l1oip_keepalive(struct timer_list *t)
 static void
 l1oip_timeout(struct timer_list *t)
 {
-	struct l1oip			*hc = from_timer(hc, t,
-								  timeout_tl);
+	struct l1oip			*hc = timer_container_of(hc, t,
+								     timeout_tl);
 	struct dchannel		*dch = hc->chan[hc->d_idx].dch;
 
 	if (debug & DEBUG_L1OIP_MSG)
@@ -1236,8 +1237,8 @@ release_card(struct l1oip *hc)
 
 	hc->shutdown = true;
 
-	del_timer_sync(&hc->keep_tl);
-	del_timer_sync(&hc->timeout_tl);
+	timer_shutdown_sync(&hc->keep_tl);
+	timer_shutdown_sync(&hc->timeout_tl);
 
 	cancel_work_sync(&hc->workq);
 

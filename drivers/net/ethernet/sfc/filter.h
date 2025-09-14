@@ -30,13 +30,6 @@
  *
  * Only some combinations are supported, depending on NIC type:
  *
- * - Falcon supports RX filters matching by {TCP,UDP}/IPv4 4-tuple or
- *   local 2-tuple (only implemented for Falcon B0)
- *
- * - Siena supports RX and TX filters matching by {TCP,UDP}/IPv4 4-tuple
- *   or local 2-tuple, or local MAC with or without outer VID, and RX
- *   default filters
- *
  * - Huntington supports filter matching controlled by firmware, potentially
  *   using {TCP,UDP}/IPv{4,6} 4-tuple or local 2-tuple, local MAC or I/G bit,
  *   with or without outer and inner VID
@@ -162,9 +155,9 @@ struct efx_filter_spec {
 	u32	priority:2;
 	u32	flags:6;
 	u32	dmaq_id:12;
-	u32	vport_id;
 	u32	rss_context;
-	__be16	outer_vid __aligned(4); /* allow jhash2() of match values */
+	u32	vport_id;
+	__be16	outer_vid;
 	__be16	inner_vid;
 	u8	loc_mac[ETH_ALEN];
 	u8	rem_mac[ETH_ALEN];

@@ -82,7 +82,7 @@ LABEL:
   Metadata stored on a DIMM device that partitions and identifies
   (persistently names) capacity allocated to different PMEM namespaces. It
   also indicates whether an address abstraction like a BTT is applied to
-  the namepsace.  Note that traditional partition tables, GPT/MBR, are
+  the namespace.  Note that traditional partition tables, GPT/MBR, are
   layered on top of a PMEM namespace, or an address abstraction like BTT
   if present, but partition support is deprecated going forward.
 
@@ -535,12 +535,12 @@ internally with a static identifier::
           char devname[50];
 
           snprintf(devname, sizeof(devname), "namespace%d.%d",
-                          ndctl_region_get_id(region), paramaters->id);
+                          ndctl_region_get_id(region), parameters->id);
 
           ndctl_namespace_set_alt_name(ndns, devname);
           /* 'uuid' must be set prior to setting size! */
-          ndctl_namespace_set_uuid(ndns, paramaters->uuid);
-          ndctl_namespace_set_size(ndns, paramaters->size);
+          ndctl_namespace_set_uuid(ndns, parameters->uuid);
+          ndctl_namespace_set_size(ndns, parameters->size);
           /* unlike pmem namespaces, blk namespaces have a sector size */
           if (parameters->lbasize)
                   ndctl_namespace_set_sector_size(ndns, parameters->lbasize);

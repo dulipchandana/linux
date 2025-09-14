@@ -240,7 +240,7 @@ static const struct of_device_id of_srf04_match[] = {
 	{ .compatible = "maxbotix,mb1020", .data = &mb_lv_cfg },
 	{ .compatible = "maxbotix,mb1030", .data = &mb_lv_cfg },
 	{ .compatible = "maxbotix,mb1040", .data = &mb_lv_cfg },
-	{},
+	{ }
 };
 
 MODULE_DEVICE_TABLE(of, of_srf04_match);
@@ -344,7 +344,7 @@ static int srf04_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int srf04_remove(struct platform_device *pdev)
+static void srf04_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 	struct srf04_data *data = iio_priv(indio_dev);
@@ -355,8 +355,6 @@ static int srf04_remove(struct platform_device *pdev)
 		pm_runtime_disable(data->dev);
 		pm_runtime_set_suspended(data->dev);
 	}
-
-	return 0;
 }
 
 static int  srf04_pm_runtime_suspend(struct device *dev)

@@ -60,7 +60,7 @@ static netdev_tx_t softing_netdev_start_xmit(struct sk_buff *skb,
 	struct can_frame *cf = (struct can_frame *)skb->data;
 	uint8_t buf[DPRAM_TX_SIZE];
 
-	if (can_dropped_invalid_skb(dev, skb))
+	if (can_dev_dropped_skb(dev, skb))
 		return NETDEV_TX_OK;
 
 	spin_lock(&card->spin);
@@ -729,7 +729,7 @@ static const struct attribute_group softing_pdev_group = {
 /*
  * platform driver
  */
-static int softing_pdev_remove(struct platform_device *pdev)
+static void softing_pdev_remove(struct platform_device *pdev)
 {
 	struct softing *card = platform_get_drvdata(pdev);
 	int j;
@@ -747,7 +747,6 @@ static int softing_pdev_remove(struct platform_device *pdev)
 
 	iounmap(card->dpram);
 	kfree(card);
-	return 0;
 }
 
 static int softing_pdev_probe(struct platform_device *pdev)

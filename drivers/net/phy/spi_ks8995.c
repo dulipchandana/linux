@@ -289,7 +289,7 @@ static int ks8995_reset(struct ks8995_switch *ks)
 }
 
 static ssize_t ks8995_registers_read(struct file *filp, struct kobject *kobj,
-	struct bin_attribute *bin_attr, char *buf, loff_t off, size_t count)
+	const struct bin_attribute *bin_attr, char *buf, loff_t off, size_t count)
 {
 	struct device *dev;
 	struct ks8995_switch *ks8995;
@@ -301,7 +301,7 @@ static ssize_t ks8995_registers_read(struct file *filp, struct kobject *kobj,
 }
 
 static ssize_t ks8995_registers_write(struct file *filp, struct kobject *kobj,
-	struct bin_attribute *bin_attr, char *buf, loff_t off, size_t count)
+	const struct bin_attribute *bin_attr, char *buf, loff_t off, size_t count)
 {
 	struct device *dev;
 	struct ks8995_switch *ks8995;
@@ -491,7 +491,7 @@ static void ks8995_remove(struct spi_device *spi)
 static struct spi_driver ks8995_driver = {
 	.driver = {
 		.name	    = "spi-ks8995",
-		.of_match_table = of_match_ptr(ks8895_spi_of_match),
+		.of_match_table = ks8895_spi_of_match,
 	},
 	.probe	  = ks8995_probe,
 	.remove	  = ks8995_remove,

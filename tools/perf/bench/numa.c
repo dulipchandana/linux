@@ -16,6 +16,7 @@
 #include <sched.h>
 #include <stdio.h>
 #include <assert.h>
+#include <debug.h>
 #include <malloc.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -26,6 +27,7 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <linux/kernel.h>
 #include <linux/time64.h>
@@ -34,6 +36,7 @@
 
 #include "../util/header.h"
 #include "../util/mutex.h"
+#include <api/fs/fs.h>
 #include <numa.h>
 #include <numaif.h>
 
@@ -116,7 +119,6 @@ struct params {
 	long			bytes_thread;
 
 	int			nr_tasks;
-	bool			show_quiet;
 
 	bool			show_convergence;
 	bool			measure_convergence;
@@ -197,7 +199,8 @@ static const struct option options[] = {
 	OPT_BOOLEAN('c', "show_convergence", &p0.show_convergence, "show convergence details, "
 		    "convergence is reached when each process (all its threads) is running on a single NUMA node."),
 	OPT_BOOLEAN('m', "measure_convergence",	&p0.measure_convergence, "measure convergence latency"),
-	OPT_BOOLEAN('q', "quiet"	, &p0.show_quiet,	"quiet mode"),
+	OPT_BOOLEAN('q', "quiet"	, &quiet,
+		    "quiet mode (do not show any warnings or messages)"),
 	OPT_BOOLEAN('S', "serialize-startup", &p0.serialize_startup,"serialize thread startup"),
 
 	/* Special option string parsing callbacks: */
@@ -532,6 +535,57 @@ static int parse_cpu_list(const char *arg)
 	return 0;
 }
 
+/*
+ * Check whether a CPU is online
+ *
+ * Returns:
+ *     1 -> if CPU is online
+ *     0 -> if CPU is offline
+ *    -1 -> error case
+ */
+static int is_cpu_online(unsigned int cpu)
+{
+	char *str;
+	size_t strlen;
+	char buf[256];
+	int status = -1;
+	struct stat statbuf;
+
+	snprintf(buf, sizeof(buf),
+		"/sys/devices/system/cpu/cpu%d", cpu);
+	if (stat(buf, &statbuf) != 0)
+		return 0;
+
+	/*
+	 * Check if /sys/devices/system/cpu/cpux/online file
+	 * exists. Some cases cpu0 won't have online file since
+	 * it is not expected to be turned off generally.
+	 * In kernels without CONFIG_HOTPLUG_CPU, this
+	 * file won't exist
+	 */
+	snprintf(buf, sizeof(buf),
+		"/sys/devices/system/cpu/cpu%d/online", cpu);
+	if (stat(buf, &statbuf) != 0)
+		return 1;
+
+	/*
+	 * Read online file using sysfs__read_str.
+	 * If read or open fails, return -1.
+	 * If read succeeds, return value from file
+	 * which gets stored in "str"
+	 */
+	snprintf(buf, sizeof(buf),
+		"devices/system/cpu/cpu%d/online", cpu);
+
+	if (sysfs__read_str(buf, &str, &strlen) < 0)
+		return status;
+
+	status = atoi(str);
+
+	free(str);
+	return status;
+}
+
 static int parse_setup_cpu_list(void)
 {
 	struct thread_data *td;
@@ -846,7 +900,7 @@ static u64 do_work(u8 *__data, long bytes, int nr, int nr_max, int loop, u64 val
 
 	if (g->p.data_rand_walk) {
 		u32 lfsr = nr + loop + val;
-		int j;
+		long j;
 
 		for (i = 0; i < words/1024; i++) {
 			long start, end;
@@ -1474,7 +1528,7 @@ static int init(void)
 	/* char array in count_process_nodes(): */
 	BUG_ON(g->p.nr_nodes < 0);
 
-	if (g->p.show_quiet && !g->p.show_details)
+	if (quiet && !g->p.show_details)
 		g->p.show_details = -1;
 
 	/* Some memory should be specified: */
@@ -1553,7 +1607,7 @@ static void print_res(const char *name, double val,
 	if (!name)
 		name = "main,";
 
-	if (!g->p.show_quiet)
+	if (!quiet)
 		printf(" %-30s %15.3f, %-15s %s\n", name, val, txt_unit, txt_short);
 	else
 		printf(" %14.3f %s\n", val, txt_long);

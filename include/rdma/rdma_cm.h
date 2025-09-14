@@ -49,7 +49,6 @@ struct rdma_addr {
 	struct rdma_dev_addr dev_addr;
 };
 
-#define RDMA_PRIMARY_PATH_MAX_REC_NUM 3
 struct rdma_route {
 	struct rdma_addr addr;
 	struct sa_path_rec *path_rec;
@@ -389,6 +388,5 @@ void rdma_read_gids(struct rdma_cm_id *cm_id, union ib_gid *sgid,
 		    union ib_gid *dgid);
 
 struct iw_cm_id *rdma_iw_cm_id(struct rdma_cm_id *cm_id);
-struct rdma_cm_id *rdma_res_to_id(struct rdma_restrack_entry *res);
 
 #endif /* RDMA_CM_H */

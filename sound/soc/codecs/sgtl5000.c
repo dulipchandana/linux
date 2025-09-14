@@ -13,11 +13,11 @@
 #include <linux/i2c.h>
 #include <linux/clk.h>
 #include <linux/log2.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/consumer.h>
-#include <linux/of_device.h>
 #include <sound/core.h>
 #include <sound/tlv.h>
 #include <sound/pcm.h>
@@ -806,9 +806,9 @@ static int sgtl5000_set_dai_fmt(struct snd_soc_dai *codec_dai, unsigned int fmt)
 	 *  - clock and frame master
 	 */
 	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
-	case SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_CBP_CFP:
 		i2sctl |= SGTL5000_I2S_MASTER;
 		sgtl5000->master = 1;
 		break;
@@ -1794,6 +1794,7 @@ static void sgtl5000_i2c_remove(struct i2c_client *client)
 {
 	struct sgtl5000_priv *sgtl5000 = i2c_get_clientdata(client);
 
+	regmap_write(sgtl5000->regmap, SGTL5000_CHIP_CLK_CTRL, SGTL5000_CHIP_CLK_CTRL_DEFAULT);
 	regmap_write(sgtl5000->regmap, SGTL5000_CHIP_DIG_POWER, SGTL5000_DIG_POWER_DEFAULT);
 	regmap_write(sgtl5000->regmap, SGTL5000_CHIP_ANA_POWER, SGTL5000_ANA_POWER_DEFAULT);
 
@@ -1808,7 +1809,7 @@ static void sgtl5000_i2c_shutdown(struct i2c_client *client)
 }
 
 static const struct i2c_device_id sgtl5000_id[] = {
-	{"sgtl5000", 0},
+	{"sgtl5000"},
 	{},
 };
 
@@ -1825,7 +1826,7 @@ static struct i2c_driver sgtl5000_i2c_driver = {
 		.name = "sgtl5000",
 		.of_match_table = sgtl5000_dt_ids,
 	},
-	.probe_new = sgtl5000_i2c_probe,
+	.probe = sgtl5000_i2c_probe,
 	.remove = sgtl5000_i2c_remove,
 	.shutdown = sgtl5000_i2c_shutdown,
 	.id_table = sgtl5000_id,

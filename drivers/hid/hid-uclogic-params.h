@@ -18,6 +18,10 @@
 
 #include <linux/usb.h>
 #include <linux/hid.h>
+#include <linux/list.h>
+
+#define UCLOGIC_MOUSE_FRAME_QUIRK	BIT(0)
+#define UCLOGIC_BATTERY_QUIRK		BIT(1)
 
 /* Types of pen in-range reporting */
 enum uclogic_params_pen_inrange {
@@ -75,7 +79,7 @@ struct uclogic_params_pen {
 	 * Pointer to report descriptor part describing the pen inputs.
 	 * Allocated with kmalloc. NULL if the part is not specified.
 	 */
-	__u8 *desc_ptr;
+	const __u8 *desc_ptr;
 	/*
 	 * Size of the report descriptor.
 	 * Only valid, if "desc_ptr" is not NULL.
@@ -114,7 +118,7 @@ struct uclogic_params_frame {
 	 * Pointer to report descriptor part describing the frame inputs.
 	 * Allocated with kmalloc. NULL if the part is not specified.
 	 */
-	__u8 *desc_ptr;
+	const __u8 *desc_ptr;
 	/*
 	 * Size of the report descriptor.
 	 * Only valid, if "desc_ptr" is not NULL.
@@ -171,6 +175,22 @@ struct uclogic_params_frame {
 	 * counterclockwise, as opposed to the normal 1 and -1.
 	 */
 	unsigned int bitmap_dial_byte;
+	/*
+	 * Destination offset for the second bitmap dial byte, if the tablet
+	 * supports a second dial at all.
+	 */
+	unsigned int bitmap_second_dial_destination_byte;
+};
+
+/*
+ * List of works to be performed when a certain raw event is received.
+ */
+struct uclogic_raw_event_hook {
+	struct hid_device *hdev;
+	__u8 *event;
+	size_t size;
+	struct work_struct work;
+	struct list_head list;
 };
 
 /*
@@ -197,7 +217,7 @@ struct uclogic_params {
 	 * allocated with kmalloc. NULL if no common part is needed.
 	 * Only valid, if "invalid" is false.
 	 */
-	__u8 *desc_ptr;
+	const __u8 *desc_ptr;
 	/*
 	 * Size of the common part of the replacement report descriptor.
 	 * Only valid, if "desc_ptr" is valid and not NULL.
@@ -213,6 +233,31 @@ struct uclogic_params {
 	 * parts. Only valid, if "invalid" is false.
 	 */
 	struct uclogic_params_frame frame_list[3];
+	/*
+	 * List of event hooks.
+	 */
+	struct uclogic_raw_event_hook *event_hooks;
+};
+
+/* Driver data */
+struct uclogic_drvdata {
+	/* Interface parameters */
+	struct uclogic_params params;
+	/* Pointer to the replacement report descriptor. NULL if none. */
+	const __u8 *desc_ptr;
+	/*
+	 * Size of the replacement report descriptor.
+	 * Only valid if desc_ptr is not NULL
+	 */
+	unsigned int desc_size;
+	/* Pen input device */
+	struct input_dev *pen_input;
+	/* In-range timer */
+	struct timer_list inrange_timer;
+	/* Last rotary encoder state, or U8_MAX for none */
+	u8 re_state;
+	/* Device quirks */
+	unsigned long quirks;
 };
 
 /* Initialize a tablet interface and discover its parameters */
@@ -221,7 +266,7 @@ extern int uclogic_params_init(struct uclogic_params *params,
 
 /* Get a replacement report descriptor for a tablet's interface. */
 extern int uclogic_params_get_desc(const struct uclogic_params *params,
-					__u8 **pdesc,
+					const __u8 **pdesc,
 					unsigned int *psize);
 
 /* Free resources used by tablet interface's parameters */

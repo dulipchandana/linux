@@ -21,7 +21,7 @@
 #include <linux/pm_runtime.h>
 
 #include <linux/rtsx_usb.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #if defined(CONFIG_LEDS_CLASS) || (defined(CONFIG_LEDS_CLASS_MODULE) && \
 		defined(CONFIG_MMC_REALTEK_USB_MODULE))
@@ -312,9 +312,6 @@ static void sd_send_cmd_get_rsp(struct rtsx_usb_sdmmc *host,
 		break;
 	case MMC_RSP_R1:
 		rsp_type = SD_RSP_TYPE_R1;
-		break;
-	case MMC_RSP_R1_NO_CRC:
-		rsp_type = SD_RSP_TYPE_R1 | SD_NO_CHECK_CRC7;
 		break;
 	case MMC_RSP_R1B:
 		rsp_type = SD_RSP_TYPE_R1b;
@@ -1013,29 +1010,45 @@ static int sd_power_off(struct rtsx_usb_sdmmc *host)
 	return sd_pull_ctl_disable_qfn24(ucr);
 }
 
-static int sd_set_power_mode(struct rtsx_usb_sdmmc *host,
+static void sd_set_power_mode(struct rtsx_usb_sdmmc *host,
 		unsigned char power_mode)
 {
 	int err;
-
-	if (power_mode != MMC_POWER_OFF)
-		power_mode = MMC_POWER_ON;
+	struct rtsx_ucr *ucr = host->ucr;
 
 	if (power_mode == host->power_mode)
-		return 0;
+		return;
 
-	if (power_mode == MMC_POWER_OFF) {
+	switch (power_mode) {
+	case MMC_POWER_OFF:
 		err = sd_power_off(host);
+		if (err)
+			dev_dbg(sdmmc_dev(host), "power-off (err = %d)\n", err);
 		pm_runtime_put_noidle(sdmmc_dev(host));
-	} else {
+		break;
+
+	case MMC_POWER_UP:
 		pm_runtime_get_noresume(sdmmc_dev(host));
 		err = sd_power_on(host);
+		if (err)
+			dev_dbg(sdmmc_dev(host), "power-on (err = %d)\n", err);
+		/* issue the clock signals to card at least 74 clocks */
+		rtsx_usb_write_register(ucr, SD_BUS_STAT, SD_CLK_TOGGLE_EN, SD_CLK_TOGGLE_EN);
+		break;
+
+	case MMC_POWER_ON:
+		/* stop to send the clock signals */
+		rtsx_usb_write_register(ucr, SD_BUS_STAT, SD_CLK_TOGGLE_EN, 0x00);
+		break;
+
+	case MMC_POWER_UNDEFINED:
+		break;
+
+	default:
+		break;
 	}
 
-	if (!err)
-		host->power_mode = power_mode;
-
-	return err;
+	host->power_mode = power_mode;
 }
 
 static int sd_set_timing(struct rtsx_usb_sdmmc *host,
@@ -1329,6 +1342,7 @@ static int rtsx_usb_sdmmc_drv_probe(struct platform_device *pdev)
 #ifdef RTSX_USB_USE_LEDS_CLASS
 	int err;
 #endif
+	int ret;
 
 	ucr = usb_get_intfdata(to_usb_interface(pdev->dev.parent));
 	if (!ucr)
@@ -1336,7 +1350,7 @@ static int rtsx_usb_sdmmc_drv_probe(struct platform_device *pdev)
 
 	dev_dbg(&(pdev->dev), ": Realtek USB SD/MMC controller found\n");
 
-	mmc = mmc_alloc_host(sizeof(*host), &pdev->dev);
+	mmc = devm_mmc_alloc_host(&pdev->dev, sizeof(*host));
 	if (!mmc)
 		return -ENOMEM;
 
@@ -1365,18 +1379,25 @@ static int rtsx_usb_sdmmc_drv_probe(struct platform_device *pdev)
 	INIT_WORK(&host->led_work, rtsx_usb_update_led);
 
 #endif
-	mmc_add_host(mmc);
+	ret = mmc_add_host(mmc);
+	if (ret) {
+#ifdef RTSX_USB_USE_LEDS_CLASS
+		led_classdev_unregister(&host->led);
+#endif
+		pm_runtime_disable(&pdev->dev);
+		return ret;
+	}
 
 	return 0;
 }
 
-static int rtsx_usb_sdmmc_drv_remove(struct platform_device *pdev)
+static void rtsx_usb_sdmmc_drv_remove(struct platform_device *pdev)
 {
 	struct rtsx_usb_sdmmc *host = platform_get_drvdata(pdev);
 	struct mmc_host *mmc;
 
 	if (!host)
-		return 0;
+		return;
 
 	mmc = host->mmc;
 	host->host_removal = true;
@@ -1400,14 +1421,11 @@ static int rtsx_usb_sdmmc_drv_remove(struct platform_device *pdev)
 	led_classdev_unregister(&host->led);
 #endif
 
-	mmc_free_host(mmc);
 	pm_runtime_disable(&pdev->dev);
 	platform_set_drvdata(pdev, NULL);
 
 	dev_dbg(&(pdev->dev),
 		": Realtek USB SD/MMC module has been removed\n");
-
-	return 0;
 }
 
 #ifdef CONFIG_PM

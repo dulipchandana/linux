@@ -854,6 +854,7 @@ static int qp_notify_peer_local(bool attach, struct vmci_handle handle)
 	u32 context_id = vmci_get_context_id();
 	struct vmci_event_qp ev;
 
+	memset(&ev, 0, sizeof(ev));
 	ev.msg.hdr.dst = vmci_make_handle(context_id, VMCI_EVENT_HANDLER);
 	ev.msg.hdr.src = vmci_make_handle(VMCI_HYPERVISOR_CONTEXT_ID,
 					  VMCI_CONTEXT_RESOURCE_ID);
@@ -1467,6 +1468,7 @@ static int qp_notify_peer(bool attach,
 	 * kernel.
 	 */
 
+	memset(&ev, 0, sizeof(ev));
 	ev.msg.hdr.dst = vmci_make_handle(peer_id, VMCI_EVENT_HANDLER);
 	ev.msg.hdr.src = vmci_make_handle(VMCI_HYPERVISOR_CONTEXT_ID,
 					  VMCI_CONTEXT_RESOURCE_ID);
@@ -3019,139 +3021,6 @@ s64 vmci_qpair_consume_buf_ready(const struct vmci_qp *qpair)
 	return result;
 }
 EXPORT_SYMBOL_GPL(vmci_qpair_consume_buf_ready);
-
-/*
- * vmci_qpair_enqueue() - Throw data on the queue.
- * @qpair:      Pointer to the queue pair struct.
- * @buf:        Pointer to buffer containing data
- * @buf_size:   Length of buffer.
- * @buf_type:   Buffer type (Unused).
- *
- * This is the client interface for enqueueing data into the queue.
- * Returns number of bytes enqueued or < 0 on error.
- */
-ssize_t vmci_qpair_enqueue(struct vmci_qp *qpair,
-			   const void *buf,
-			   size_t buf_size,
-			   int buf_type)
-{
-	ssize_t result;
-	struct iov_iter from;
-	struct kvec v = {.iov_base = (void *)buf, .iov_len = buf_size};
-
-	if (!qpair || !buf)
-		return VMCI_ERROR_INVALID_ARGS;
-
-	iov_iter_kvec(&from, WRITE, &v, 1, buf_size);
-
-	qp_lock(qpair);
-
-	do {
-		result = qp_enqueue_locked(qpair->produce_q,
-					   qpair->consume_q,
-					   qpair->produce_q_size,
-					   &from);
-
-		if (result == VMCI_ERROR_QUEUEPAIR_NOT_READY &&
-		    !qp_wait_for_ready_queue(qpair))
-			result = VMCI_ERROR_WOULD_BLOCK;
-
-	} while (result == VMCI_ERROR_QUEUEPAIR_NOT_READY);
-
-	qp_unlock(qpair);
-
-	return result;
-}
-EXPORT_SYMBOL_GPL(vmci_qpair_enqueue);
-
-/*
- * vmci_qpair_dequeue() - Get data from the queue.
- * @qpair:      Pointer to the queue pair struct.
- * @buf:        Pointer to buffer for the data
- * @buf_size:   Length of buffer.
- * @buf_type:   Buffer type (Unused).
- *
- * This is the client interface for dequeueing data from the queue.
- * Returns number of bytes dequeued or < 0 on error.
- */
-ssize_t vmci_qpair_dequeue(struct vmci_qp *qpair,
-			   void *buf,
-			   size_t buf_size,
-			   int buf_type)
-{
-	ssize_t result;
-	struct iov_iter to;
-	struct kvec v = {.iov_base = buf, .iov_len = buf_size};
-
-	if (!qpair || !buf)
-		return VMCI_ERROR_INVALID_ARGS;
-
-	iov_iter_kvec(&to, READ, &v, 1, buf_size);
-
-	qp_lock(qpair);
-
-	do {
-		result = qp_dequeue_locked(qpair->produce_q,
-					   qpair->consume_q,
-					   qpair->consume_q_size,
-					   &to, true);
-
-		if (result == VMCI_ERROR_QUEUEPAIR_NOT_READY &&
-		    !qp_wait_for_ready_queue(qpair))
-			result = VMCI_ERROR_WOULD_BLOCK;
-
-	} while (result == VMCI_ERROR_QUEUEPAIR_NOT_READY);
-
-	qp_unlock(qpair);
-
-	return result;
-}
-EXPORT_SYMBOL_GPL(vmci_qpair_dequeue);
-
-/*
- * vmci_qpair_peek() - Peek at the data in the queue.
- * @qpair:      Pointer to the queue pair struct.
- * @buf:        Pointer to buffer for the data
- * @buf_size:   Length of buffer.
- * @buf_type:   Buffer type (Unused on Linux).
- *
- * This is the client interface for peeking into a queue.  (I.e.,
- * copy data from the queue without updating the head pointer.)
- * Returns number of bytes dequeued or < 0 on error.
- */
-ssize_t vmci_qpair_peek(struct vmci_qp *qpair,
-			void *buf,
-			size_t buf_size,
-			int buf_type)
-{
-	struct iov_iter to;
-	struct kvec v = {.iov_base = buf, .iov_len = buf_size};
-	ssize_t result;
-
-	if (!qpair || !buf)
-		return VMCI_ERROR_INVALID_ARGS;
-
-	iov_iter_kvec(&to, READ, &v, 1, buf_size);
-
-	qp_lock(qpair);
-
-	do {
-		result = qp_dequeue_locked(qpair->produce_q,
-					   qpair->consume_q,
-					   qpair->consume_q_size,
-					   &to, false);
-
-		if (result == VMCI_ERROR_QUEUEPAIR_NOT_READY &&
-		    !qp_wait_for_ready_queue(qpair))
-			result = VMCI_ERROR_WOULD_BLOCK;
-
-	} while (result == VMCI_ERROR_QUEUEPAIR_NOT_READY);
-
-	qp_unlock(qpair);
-
-	return result;
-}
-EXPORT_SYMBOL_GPL(vmci_qpair_peek);
 
 /*
  * vmci_qpair_enquev() - Throw data on the queue using iov.

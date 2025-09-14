@@ -74,6 +74,7 @@ void rtl8411b_init_params(struct rtsx_pcr *pcr);
 void rts5260_init_params(struct rtsx_pcr *pcr);
 void rts5261_init_params(struct rtsx_pcr *pcr);
 void rts5228_init_params(struct rtsx_pcr *pcr);
+void rts5264_init_params(struct rtsx_pcr *pcr);
 
 static inline u8 map_sd_drive(int idx)
 {
@@ -126,7 +127,5 @@ int rtsx_pci_get_ocpstat(struct rtsx_pcr *pcr, u8 *val);
 void rtsx_pci_clear_ocpstat(struct rtsx_pcr *pcr);
 void rtsx_pci_enable_oobs_polling(struct rtsx_pcr *pcr);
 void rtsx_pci_disable_oobs_polling(struct rtsx_pcr *pcr);
-int rtsx_sd_power_off_card3v3(struct rtsx_pcr *pcr);
-int rtsx_ms_power_off_card3v3(struct rtsx_pcr *pcr);
 
 #endif

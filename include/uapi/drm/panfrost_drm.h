@@ -21,6 +21,7 @@ extern "C" {
 #define DRM_PANFROST_PERFCNT_ENABLE		0x06
 #define DRM_PANFROST_PERFCNT_DUMP		0x07
 #define DRM_PANFROST_MADVISE			0x08
+#define DRM_PANFROST_SET_LABEL_BO		0x09
 
 #define DRM_IOCTL_PANFROST_SUBMIT		DRM_IOW(DRM_COMMAND_BASE + DRM_PANFROST_SUBMIT, struct drm_panfrost_submit)
 #define DRM_IOCTL_PANFROST_WAIT_BO		DRM_IOW(DRM_COMMAND_BASE + DRM_PANFROST_WAIT_BO, struct drm_panfrost_wait_bo)
@@ -29,6 +30,7 @@ extern "C" {
 #define DRM_IOCTL_PANFROST_GET_PARAM		DRM_IOWR(DRM_COMMAND_BASE + DRM_PANFROST_GET_PARAM, struct drm_panfrost_get_param)
 #define DRM_IOCTL_PANFROST_GET_BO_OFFSET	DRM_IOWR(DRM_COMMAND_BASE + DRM_PANFROST_GET_BO_OFFSET, struct drm_panfrost_get_bo_offset)
 #define DRM_IOCTL_PANFROST_MADVISE		DRM_IOWR(DRM_COMMAND_BASE + DRM_PANFROST_MADVISE, struct drm_panfrost_madvise)
+#define DRM_IOCTL_PANFROST_SET_LABEL_BO		DRM_IOWR(DRM_COMMAND_BASE + DRM_PANFROST_SET_LABEL_BO, struct drm_panfrost_set_label_bo)
 
 /*
  * Unstable ioctl(s): only exposed when the unsafe unstable_ioctls module
@@ -40,6 +42,7 @@ extern "C" {
 #define DRM_IOCTL_PANFROST_PERFCNT_DUMP		DRM_IOW(DRM_COMMAND_BASE + DRM_PANFROST_PERFCNT_DUMP, struct drm_panfrost_perfcnt_dump)
 
 #define PANFROST_JD_REQ_FS (1 << 0)
+#define PANFROST_JD_REQ_CYCLE_COUNT (1 << 1)
 /**
  * struct drm_panfrost_submit - ioctl argument for submitting commands to the 3D
  * engine.
@@ -172,6 +175,8 @@ enum drm_panfrost_param {
 	DRM_PANFROST_PARAM_NR_CORE_GROUPS,
 	DRM_PANFROST_PARAM_THREAD_TLS_ALLOC,
 	DRM_PANFROST_PARAM_AFBC_FEATURES,
+	DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP,
+	DRM_PANFROST_PARAM_SYSTEM_TIMESTAMP_FREQUENCY,
 };
 
 struct drm_panfrost_get_param {
@@ -224,6 +229,25 @@ struct drm_panfrost_madvise {
 	__u32 retained;       /* out, whether backing store still exists */
 };
 
+/**
+ * struct drm_panfrost_set_label_bo - ioctl argument for labelling Panfrost BOs.
+ */
+struct drm_panfrost_set_label_bo {
+	/** @handle: Handle of the buffer object to label. */
+	__u32 handle;
+
+	/**  @pad: MBZ. */
+	__u32 pad;
+
+	/**
+	 * @label: User pointer to a NUL-terminated string
+	 *
+	 * Length cannot be greater than 4096.
+	 * NULL is permitted and means clear the label.
+	 */
+	__u64 label;
+};
+
 /* Definitions for coredump decoding in user space */
 #define PANFROSTDUMP_MAJOR 1
 #define PANFROSTDUMP_MINOR 0
@@ -235,25 +259,29 @@ struct drm_panfrost_madvise {
 #define PANFROSTDUMP_BUF_BO (PANFROSTDUMP_BUF_BOMAP + 1)
 #define PANFROSTDUMP_BUF_TRAILER (PANFROSTDUMP_BUF_BO + 1)
 
+/*
+ * This structure is the native endianness of the dumping machine, tools can
+ * detect the endianness by looking at the value in 'magic'.
+ */
 struct panfrost_dump_object_header {
-	__le32 magic;
-	__le32 type;
-	__le32 file_size;
-	__le32 file_offset;
+	__u32 magic;
+	__u32 type;
+	__u32 file_size;
+	__u32 file_offset;
 
 	union {
-		struct pan_reg_hdr {
-			__le64 jc;
-			__le32 gpu_id;
-			__le32 major;
-			__le32 minor;
-			__le64 nbos;
+		struct {
+			__u64 jc;
+			__u32 gpu_id;
+			__u32 major;
+			__u32 minor;
+			__u64 nbos;
 		} reghdr;
 
-		struct pan_bomap_hdr {
-			__le32 valid;
-			__le64 iova;
-			__le32 data[2];
+		struct {
+			__u32 valid;
+			__u64 iova;
+			__u32 data[2];
 		} bomap;
 
 		/*
@@ -261,14 +289,14 @@ struct panfrost_dump_object_header {
 		 * with new fields and also keep it 512-byte aligned
 		 */
 
-		__le32 sizer[496];
+		__u32 sizer[496];
 	};
 };
 
 /* Registers object, an array of these */
 struct panfrost_dump_registers {
-	__le32 reg;
-	__le32 value;
+	__u32 reg;
+	__u32 value;
 };
 
 #if defined(__cplusplus)

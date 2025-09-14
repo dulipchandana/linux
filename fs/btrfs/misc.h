@@ -3,12 +3,22 @@
 #ifndef BTRFS_MISC_H
 #define BTRFS_MISC_H
 
+#include <linux/types.h>
+#include <linux/bitmap.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
+#include <linux/mm.h>
+#include <linux/pagemap.h>
 #include <linux/math64.h>
 #include <linux/rbtree.h>
 
-#define in_range(b, first, len) ((b) >= (first) && (b) < (first) + (len))
+/*
+ * Enumerate bits using enum autoincrement. Define the @name as the n-th bit.
+ */
+#define ENUM_BIT(name)                                  \
+	__ ## name ## _BIT,                             \
+	name = (1U << __ ## name ## _BIT),              \
+	__ ## name ## _SEQ = __ ## name ## _BIT
 
 static inline void cond_wake_up(struct wait_queue_head *wq)
 {
@@ -32,22 +42,10 @@ static inline void cond_wake_up_nomb(struct wait_queue_head *wq)
 		wake_up(wq);
 }
 
-static inline u64 div_factor(u64 num, int factor)
+static inline u64 mult_perc(u64 num, u32 percent)
 {
-	if (factor == 10)
-		return num;
-	num *= factor;
-	return div_u64(num, 10);
+	return div_u64(num * percent, 100);
 }
-
-static inline u64 div_factor_fine(u64 num, int factor)
-{
-	if (factor == 100)
-		return num;
-	num *= factor;
-	return div_u64(num, 100);
-}
-
 /* Copy of is_power_of_two that is 64bit safe */
 static inline bool is_power_of_two_u64(u64 n)
 {
@@ -70,7 +68,7 @@ struct rb_simple_node {
 	u64 bytenr;
 };
 
-static inline struct rb_node *rb_simple_search(struct rb_root *root, u64 bytenr)
+static inline struct rb_node *rb_simple_search(const struct rb_root *root, u64 bytenr)
 {
 	struct rb_node *node = root->rb_node;
 	struct rb_simple_node *entry;
@@ -97,7 +95,7 @@ static inline struct rb_node *rb_simple_search(struct rb_root *root, u64 bytenr)
  * Return the rb_node that start at or after @bytenr.  If there is no entry at
  * or after @bytner return NULL.
  */
-static inline struct rb_node *rb_simple_search_first(struct rb_root *root,
+static inline struct rb_node *rb_simple_search_first(const struct rb_root *root,
 						     u64 bytenr)
 {
 	struct rb_node *node = root->rb_node, *ret = NULL;
@@ -123,28 +121,48 @@ static inline struct rb_node *rb_simple_search_first(struct rb_root *root,
 	return ret;
 }
 
-static inline struct rb_node *rb_simple_insert(struct rb_root *root, u64 bytenr,
-					       struct rb_node *node)
+static int rb_simple_node_bytenr_cmp(struct rb_node *new, const struct rb_node *existing)
 {
-	struct rb_node **p = &root->rb_node;
-	struct rb_node *parent = NULL;
-	struct rb_simple_node *entry;
+	struct rb_simple_node *new_entry = rb_entry(new, struct rb_simple_node, rb_node);
+	struct rb_simple_node *existing_entry = rb_entry(existing, struct rb_simple_node, rb_node);
 
-	while (*p) {
-		parent = *p;
-		entry = rb_entry(parent, struct rb_simple_node, rb_node);
+	if (new_entry->bytenr < existing_entry->bytenr)
+		return -1;
+	else if (new_entry->bytenr > existing_entry->bytenr)
+		return 1;
 
-		if (bytenr < entry->bytenr)
-			p = &(*p)->rb_left;
-		else if (bytenr > entry->bytenr)
-			p = &(*p)->rb_right;
-		else
-			return parent;
-	}
+	return 0;
+}
 
-	rb_link_node(node, parent, p);
-	rb_insert_color(node, root);
-	return NULL;
+static inline struct rb_node *rb_simple_insert(struct rb_root *root,
+					       struct rb_simple_node *simple_node)
+{
+	return rb_find_add(&simple_node->rb_node, root, rb_simple_node_bytenr_cmp);
+}
+
+static inline bool bitmap_test_range_all_set(const unsigned long *addr,
+					     unsigned long start,
+					     unsigned long nbits)
+{
+	unsigned long found_zero;
+
+	found_zero = find_next_zero_bit(addr, start + nbits, start);
+	return (found_zero == start + nbits);
+}
+
+static inline bool bitmap_test_range_all_zero(const unsigned long *addr,
+					      unsigned long start,
+					      unsigned long nbits)
+{
+	unsigned long found_set;
+
+	found_set = find_next_bit(addr, start + nbits, start);
+	return (found_set == start + nbits);
+}
+
+static inline u64 folio_end(struct folio *folio)
+{
+	return folio_pos(folio) + folio_size(folio);
 }
 
 #endif

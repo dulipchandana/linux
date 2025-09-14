@@ -257,7 +257,7 @@ static int hdm_poison_channel(struct most_interface *iface, int channel)
 		mdev->padding_active[channel] = false;
 
 	if (mdev->conf[channel].data_type == MOST_CH_ASYNC) {
-		del_timer_sync(&mdev->link_stat_timer);
+		timer_delete_sync(&mdev->link_stat_timer);
 		cancel_work_sync(&mdev->poll_work_obj);
 	}
 	mutex_unlock(&mdev->io_mutex);
@@ -660,14 +660,14 @@ static void hdm_request_netinfo(struct most_interface *iface, int channel,
 
 /**
  * link_stat_timer_handler - schedule work obtaining mac address and link status
- * @data: pointer to USB device instance
+ * @t: pointer to timer_list which holds a pointer to the USB device instance
  *
  * The handler runs in interrupt context. That's why we need to defer the
  * tasks to a work queue.
  */
 static void link_stat_timer_handler(struct timer_list *t)
 {
-	struct most_dev *mdev = from_timer(mdev, t, link_stat_timer);
+	struct most_dev *mdev = timer_container_of(mdev, t, link_stat_timer);
 
 	schedule_work(&mdev->poll_work_obj);
 	mdev->link_stat_timer.expires = jiffies + (2 * HZ);
@@ -763,14 +763,14 @@ static void wq_clear_halt(struct work_struct *wq_obj)
 	mutex_unlock(&mdev->io_mutex);
 }
 
-/**
+/*
  * hdm_usb_fops - file operation table for USB driver
  */
 static const struct file_operations hdm_usb_fops = {
 	.owner = THIS_MODULE,
 };
 
-/**
+/*
  * usb_device_id - ID table for HCD device probing
  */
 static const struct usb_device_id usbid[] = {
@@ -1115,7 +1115,7 @@ static void hdm_disconnect(struct usb_interface *interface)
 	mdev->usb_device = NULL;
 	mutex_unlock(&mdev->io_mutex);
 
-	del_timer_sync(&mdev->link_stat_timer);
+	timer_delete_sync(&mdev->link_stat_timer);
 	cancel_work_sync(&mdev->poll_work_obj);
 
 	if (mdev->dci)

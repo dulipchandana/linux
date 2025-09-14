@@ -2210,8 +2210,6 @@ static const struct vb2_ops vpe_qops = {
 	.queue_setup	 = vpe_queue_setup,
 	.buf_prepare	 = vpe_buf_prepare,
 	.buf_queue	 = vpe_buf_queue,
-	.wait_prepare	 = vb2_ops_wait_prepare,
-	.wait_finish	 = vb2_ops_wait_finish,
 	.start_streaming = vpe_start_streaming,
 	.stop_streaming  = vpe_stop_streaming,
 };
@@ -2622,7 +2620,7 @@ v4l2_dev_unreg:
 	return ret;
 }
 
-static int vpe_remove(struct platform_device *pdev)
+static void vpe_remove(struct platform_device *pdev)
 {
 	struct vpe_dev *dev = platform_get_drvdata(pdev);
 
@@ -2635,8 +2633,6 @@ static int vpe_remove(struct platform_device *pdev)
 	vpe_set_clock_enable(dev, 0);
 	vpe_runtime_put(pdev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 #if defined(CONFIG_OF)

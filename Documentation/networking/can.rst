@@ -444,6 +444,24 @@ definitions are specified for CAN specific MTUs in include/linux/can.h:
   #define CANFD_MTU (sizeof(struct canfd_frame)) == 72  => CAN FD frame
 
 
+Returned Message Flags
+----------------------
+
+When using the system call recvmsg(2) on a RAW or a BCM socket, the
+msg->msg_flags field may contain the following flags:
+
+MSG_DONTROUTE:
+	set when the received frame was created on the local host.
+
+MSG_CONFIRM:
+	set when the frame was sent via the socket it is received on.
+	This flag can be interpreted as a 'transmission confirmation' when the
+	CAN driver supports the echo of frames on driver level, see
+	:ref:`socketcan-local-loopback1` and :ref:`socketcan-local-loopback2`.
+	(Note: In order to receive such messages on a RAW socket,
+	CAN_RAW_RECV_OWN_MSGS must be set.)
+
+
 .. _socketcan-raw-sockets:
 
 RAW Protocol Sockets with can_filters (SOCK_RAW)
@@ -681,32 +699,16 @@ RAW socket option CAN_RAW_JOIN_FILTERS
 
 The CAN_RAW socket can set multiple CAN identifier specific filters that
 lead to multiple filters in the af_can.c filter processing. These filters
-are indenpendent from each other which leads to logical OR'ed filters when
+are independent from each other which leads to logical OR'ed filters when
 applied (see :ref:`socketcan-rawfilter`).
 
-This socket option joines the given CAN filters in the way that only CAN
+This socket option joins the given CAN filters in the way that only CAN
 frames are passed to user space that matched *all* given CAN filters. The
 semantic for the applied filters is therefore changed to a logical AND.
 
 This is useful especially when the filterset is a combination of filters
 where the CAN_INV_FILTER flag is set in order to notch single CAN IDs or
 CAN ID ranges from the incoming traffic.
-
-
-RAW Socket Returned Message Flags
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-When using recvmsg() call, the msg->msg_flags may contain following flags:
-
-MSG_DONTROUTE:
-	set when the received frame was created on the local host.
-
-MSG_CONFIRM:
-	set when the frame was sent via the socket it is received on.
-	This flag can be interpreted as a 'transmission confirmation' when the
-	CAN driver supports the echo of frames on driver level, see
-	:ref:`socketcan-local-loopback1` and :ref:`socketcan-local-loopback2`.
-	In order to receive such messages, CAN_RAW_RECV_OWN_MSGS must be set.
 
 
 Broadcast Manager Protocol Sockets (SOCK_DGRAM)
@@ -740,7 +742,7 @@ The broadcast manager sends responses to user space in the same form:
             struct timeval ival1, ival2;    /* count and subsequent interval */
             canid_t can_id;                 /* unique can_id for task */
             __u32 nframes;                  /* number of can_frames following */
-            struct can_frame frames[0];
+            struct can_frame frames[];
     };
 
 The aligned payload 'frames' uses the same basic CAN frame structure defined
@@ -931,7 +933,7 @@ ival1:
 ival2:
 	Throttle the received message rate down to the value of ival2. This
 	is useful to reduce messages for the application when the signal inside the
-	CAN frame is stateless as state changes within the ival2 periode may get
+	CAN frame is stateless as state changes within the ival2 period may get
 	lost.
 
 Broadcast Manager Multiplex Message Receive Filter
@@ -1102,15 +1104,12 @@ for writing CAN network device driver are described below:
 General Settings
 ----------------
 
+CAN network device drivers can use alloc_candev_mqs() and friends instead of
+alloc_netdev_mqs(), to automatically take care of CAN-specific setup:
+
 .. code-block:: C
 
-    dev->type  = ARPHRD_CAN; /* the netdevice hardware type */
-    dev->flags = IFF_NOARP;  /* CAN has no arp */
-
-    dev->mtu = CAN_MTU; /* sizeof(struct can_frame) -> Classical CAN interface */
-
-    or alternative, when the controller supports CAN with flexible data rate:
-    dev->mtu = CANFD_MTU; /* sizeof(struct canfd_frame) -> CAN FD interface */
+    dev = alloc_candev_mqs(...);
 
 The struct can_frame or struct canfd_frame is the payload of each socket
 buffer (skbuff) in the protocol family PF_CAN.
@@ -1146,6 +1145,39 @@ Therefore the use of hardware filters goes to the category 'handmade
 tuning on deep embedded systems'. The author is running a MPC603e
 @133MHz with four SJA1000 CAN controllers from 2002 under heavy bus
 load without any problems ...
+
+
+Switchable Termination Resistors
+--------------------------------
+
+CAN bus requires a specific impedance across the differential pair,
+typically provided by two 120Ohm resistors on the farthest nodes of
+the bus. Some CAN controllers support activating / deactivating a
+termination resistor(s) to provide the correct impedance.
+
+Query the available resistances::
+
+    $ ip -details link show can0
+    ...
+    termination 120 [ 0, 120 ]
+
+Activate the terminating resistor::
+
+    $ ip link set dev can0 type can termination 120
+
+Deactivate the terminating resistor::
+
+    $ ip link set dev can0 type can termination 0
+
+To enable termination resistor support to a can-controller, either
+implement in the controller's struct can-priv::
+
+    termination_const
+    termination_const_cnt
+    do_set_termination
+
+or add gpio control with the device tree entries from
+Documentation/devicetree/bindings/net/can/can-controller.yaml
 
 
 The Virtual CAN Driver (vcan)

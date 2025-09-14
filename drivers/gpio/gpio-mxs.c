@@ -14,7 +14,6 @@
 #include <linux/irqdomain.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/gpio/driver.h>
@@ -272,7 +271,7 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	port->id = of_alias_get_id(np, "gpio");
 	if (port->id < 0)
 		return port->id;
-	port->devid = (enum mxs_gpio_id)of_device_get_match_data(&pdev->dev);
+	port->devid = (uintptr_t)of_device_get_match_data(&pdev->dev);
 	port->dev = &pdev->dev;
 	port->irq = platform_get_irq(pdev, 0);
 	if (port->irq < 0)
@@ -304,8 +303,8 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 		goto out_iounmap;
 	}
 
-	port->domain = irq_domain_add_legacy(np, 32, irq_base, 0,
-					     &irq_domain_simple_ops, NULL);
+	port->domain = irq_domain_create_legacy(dev_fwnode(&pdev->dev), 32, irq_base, 0,
+						&irq_domain_simple_ops, NULL);
 	if (!port->domain) {
 		err = -ENODEV;
 		goto out_iounmap;
@@ -364,4 +363,3 @@ MODULE_AUTHOR("Freescale Semiconductor, "
 	      "Daniel Mack <danielncaiaq.de>, "
 	      "Juergen Beisert <kernel@pengutronix.de>");
 MODULE_DESCRIPTION("Freescale MXS GPIO");
-MODULE_LICENSE("GPL");

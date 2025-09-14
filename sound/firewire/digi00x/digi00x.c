@@ -9,7 +9,7 @@
 
 MODULE_DESCRIPTION("Digidesign Digi 002/003 family Driver");
 MODULE_AUTHOR("Takashi Sakamoto <o-takashi@sakamocchi.jp>");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 
 #define VENDOR_DIGIDESIGN	0x00a07e
 #define MODEL_CONSOLE		0x000001
@@ -30,9 +30,9 @@ static int name_card(struct snd_dg00x *dg00x)
 
 	model = skip_spaces(name);
 
-	strcpy(dg00x->card->driver, "Digi00x");
-	strcpy(dg00x->card->shortname, model);
-	strcpy(dg00x->card->mixername, model);
+	strscpy(dg00x->card->driver, "Digi00x");
+	strscpy(dg00x->card->shortname, model);
+	strscpy(dg00x->card->mixername, model);
 	snprintf(dg00x->card->longname, sizeof(dg00x->card->longname),
 		 "Digidesign %s, GUID %08x%08x at %s, S%d", model,
 		 fw_dev->config_rom[3], fw_dev->config_rom[4],

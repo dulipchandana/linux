@@ -11,10 +11,10 @@
 #include <linux/crc8.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
+#include <linux/gpio/consumer.h>
 #include <linux/if_bridge.h>
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
-#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/mii.h>
 #include <linux/module.h>
@@ -26,7 +26,7 @@
 
 #include <net/switchdev.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #define ADIN1110_PHY_ID				0x1
 
@@ -196,7 +196,7 @@ static int adin1110_read_reg(struct adin1110_priv *priv, u16 reg, u32 *val)
 {
 	u32 header_len = ADIN1110_RD_HEADER_LEN;
 	u32 read_len = ADIN1110_REG_LEN;
-	struct spi_transfer t[2] = {0};
+	struct spi_transfer t = {0};
 	int ret;
 
 	priv->data[0] = ADIN1110_CD | FIELD_GET(GENMASK(12, 8), reg);
@@ -209,17 +209,15 @@ static int adin1110_read_reg(struct adin1110_priv *priv, u16 reg, u32 *val)
 		header_len++;
 	}
 
-	t[0].tx_buf = &priv->data[0];
-	t[0].len = header_len;
-
 	if (priv->append_crc)
 		read_len++;
 
 	memset(&priv->data[header_len], 0, read_len);
-	t[1].rx_buf = &priv->data[header_len];
-	t[1].len = read_len;
+	t.tx_buf = &priv->data[0];
+	t.rx_buf = &priv->data[0];
+	t.len = read_len + header_len;
 
-	ret = spi_sync_transfer(priv->spidev, t, 2);
+	ret = spi_sync_transfer(priv->spidev, &t, 1);
 	if (ret)
 		return ret;
 
@@ -296,7 +294,7 @@ static int adin1110_read_fifo(struct adin1110_port_priv *port_priv)
 {
 	struct adin1110_priv *priv = port_priv->priv;
 	u32 header_len = ADIN1110_RD_HEADER_LEN;
-	struct spi_transfer t[2] = {0};
+	struct spi_transfer t = {0};
 	u32 frame_size_no_fcs;
 	struct sk_buff *rxb;
 	u32 frame_size;
@@ -320,19 +318,14 @@ static int adin1110_read_fifo(struct adin1110_port_priv *port_priv)
 	 * from the  ADIN1110 frame header.
 	 */
 	if (frame_size < ADIN1110_FRAME_HEADER_LEN + ADIN1110_FEC_LEN)
-		return ret;
+		return -EINVAL;
 
 	round_len = adin1110_round_len(frame_size);
 	if (round_len < 0)
-		return ret;
+		return -EINVAL;
 
 	frame_size_no_fcs = frame_size - ADIN1110_FRAME_HEADER_LEN - ADIN1110_FEC_LEN;
-
-	rxb = netdev_alloc_skb(port_priv->netdev, round_len);
-	if (!rxb)
-		return -ENOMEM;
-
-	memset(priv->data, 0, round_len + ADIN1110_RD_HEADER_LEN);
+	memset(priv->data, 0, ADIN1110_RD_HEADER_LEN);
 
 	priv->data[0] = ADIN1110_CD | FIELD_GET(GENMASK(12, 8), reg);
 	priv->data[1] = FIELD_GET(GENMASK(7, 0), reg);
@@ -342,26 +335,28 @@ static int adin1110_read_fifo(struct adin1110_port_priv *port_priv)
 		header_len++;
 	}
 
-	skb_put(rxb, frame_size_no_fcs + ADIN1110_FRAME_HEADER_LEN);
+	rxb = netdev_alloc_skb(port_priv->netdev, round_len + header_len);
+	if (!rxb)
+		return -ENOMEM;
 
-	t[0].tx_buf = &priv->data[0];
-	t[0].len = header_len;
+	skb_put(rxb, frame_size_no_fcs + header_len + ADIN1110_FRAME_HEADER_LEN);
 
-	t[1].rx_buf = &rxb->data[0];
-	t[1].len = round_len;
+	t.tx_buf = &priv->data[0];
+	t.rx_buf = &rxb->data[0];
+	t.len = header_len + round_len;
 
-	ret = spi_sync_transfer(priv->spidev, t, 2);
+	ret = spi_sync_transfer(priv->spidev, &t, 1);
 	if (ret) {
 		kfree_skb(rxb);
 		return ret;
 	}
 
-	skb_pull(rxb, ADIN1110_FRAME_HEADER_LEN);
+	skb_pull(rxb, header_len + ADIN1110_FRAME_HEADER_LEN);
 	rxb->protocol = eth_type_trans(rxb, port_priv->netdev);
 
 	if ((port_priv->flags & IFF_ALLMULTI && rxb->pkt_type == PACKET_MULTICAST) ||
 	    (port_priv->flags & IFF_BROADCAST && rxb->pkt_type == PACKET_BROADCAST))
-		rxb->offload_fwd_mark = 1;
+		rxb->offload_fwd_mark = port_priv->priv->forwarding;
 
 	netif_rx(rxb);
 
@@ -469,8 +464,9 @@ static int adin1110_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 	 * bitfield of ADIN1110_MDIOACC register will contain
 	 * the requested register value.
 	 */
-	ret = readx_poll_timeout(adin1110_read_mdio_acc, priv, val,
-				 (val & ADIN1110_MDIO_TRDONE), 10000, 30000);
+	ret = readx_poll_timeout_atomic(adin1110_read_mdio_acc, priv, val,
+					(val & ADIN1110_MDIO_TRDONE),
+					100, 30000);
 	if (ret < 0)
 		return ret;
 
@@ -500,8 +496,9 @@ static int adin1110_mdio_write(struct mii_bus *bus, int phy_id,
 	if (ret < 0)
 		return ret;
 
-	return readx_poll_timeout(adin1110_read_mdio_acc, priv, val,
-				  (val & ADIN1110_MDIO_TRDONE), 10000, 30000);
+	return readx_poll_timeout_atomic(adin1110_read_mdio_acc, priv, val,
+					 (val & ADIN1110_MDIO_TRDONE),
+					 100, 30000);
 }
 
 /* ADIN1110 MAC-PHY contains an ADIN1100 PHY.
@@ -520,7 +517,7 @@ static int adin1110_register_mdiobus(struct adin1110_priv *priv,
 		return -ENOMEM;
 
 	snprintf(priv->mii_bus_name, MII_BUS_ID_SIZE, "%s-%u",
-		 priv->cfg->name, priv->spidev->chip_select);
+		 priv->cfg->name, spi_get_chipselect(priv->spidev, 0));
 
 	mii_bus->name = priv->mii_bus_name;
 	mii_bus->read = adin1110_mdio_read;
@@ -528,7 +525,6 @@ static int adin1110_register_mdiobus(struct adin1110_priv *priv,
 	mii_bus->priv = priv;
 	mii_bus->parent = dev;
 	mii_bus->phy_mask = ~((u32)GENMASK(2, 0));
-	mii_bus->probe_capabilities = MDIOBUS_C22;
 	snprintf(mii_bus->id, MII_BUS_ID_SIZE, "%s", dev_name(dev));
 
 	ret = devm_mdiobus_register(dev, mii_bus);
@@ -745,7 +741,7 @@ static int adin1110_broadcasts_filter(struct adin1110_port_priv *port_priv,
 	u32 port_rules = 0;
 	u8 mask[ETH_ALEN];
 
-	memset(mask, 0xFF, ETH_ALEN);
+	eth_broadcast_addr(mask);
 
 	if (accept_broadcast && port_priv->state == BR_STATE_FORWARDING)
 		port_rules = adin1110_port_rules(port_priv, true, true);
@@ -766,7 +762,7 @@ static int adin1110_set_mac_address(struct net_device *netdev,
 		return -EADDRNOTAVAIL;
 
 	eth_hw_addr_set(netdev, dev_addr);
-	memset(mask, 0xFF, ETH_ALEN);
+	eth_broadcast_addr(mask);
 
 	mac_slot = (!port_priv->nr) ?  ADIN_MAC_P1_ADDR_SLOT : ADIN_MAC_P2_ADDR_SLOT;
 	port_rules = adin1110_port_rules(port_priv, true, false);
@@ -1087,8 +1083,29 @@ static void adin1110_adjust_link(struct net_device *dev)
  */
 static int adin1110_check_spi(struct adin1110_priv *priv)
 {
+	struct gpio_desc *reset_gpio;
 	int ret;
 	u32 val;
+
+	reset_gpio = devm_gpiod_get_optional(&priv->spidev->dev, "reset",
+					     GPIOD_OUT_LOW);
+	if (reset_gpio) {
+		/* MISO pin is used for internal configuration, can't have
+		 * anyone else disturbing the SDO line.
+		 */
+		spi_bus_lock(priv->spidev->controller);
+
+		gpiod_set_value(reset_gpio, 1);
+		fsleep(10000);
+		gpiod_set_value(reset_gpio, 0);
+
+		/* Need to wait 90 ms before interacting with
+		 * the MAC after a HW reset.
+		 */
+		fsleep(90000);
+
+		spi_bus_unlock(priv->spidev->controller);
+	}
 
 	ret = adin1110_read_reg(priv, ADIN1110_PHY_ID, &val);
 	if (ret < 0)
@@ -1256,7 +1273,7 @@ static int adin1110_port_set_blocking_state(struct adin1110_port_priv *port_priv
 		goto out;
 
 	/* Allow only BPDUs to be passed to the CPU */
-	memset(mask, 0xFF, ETH_ALEN);
+	eth_broadcast_addr(mask);
 	port_rules = adin1110_port_rules(port_priv, true, false);
 	ret = adin1110_write_mac_address(port_priv, mac_slot, mac,
 					 mask, port_rules);
@@ -1370,8 +1387,8 @@ static int adin1110_fdb_add(struct adin1110_port_priv *port_priv,
 		return -ENOMEM;
 
 	other_port = priv->ports[!port_priv->nr];
-	port_rules = adin1110_port_rules(port_priv, false, true);
-	memset(mask, 0xFF, ETH_ALEN);
+	port_rules = adin1110_port_rules(other_port, false, true);
+	eth_broadcast_addr(mask);
 
 	return adin1110_write_mac_address(other_port, mac_nr, (u8 *)fdb->addr,
 					  mask, port_rules);
@@ -1512,16 +1529,15 @@ static struct notifier_block adin1110_switchdev_notifier = {
 	.notifier_call = adin1110_switchdev_event,
 };
 
-static void adin1110_unregister_notifiers(void *data)
+static void adin1110_unregister_notifiers(void)
 {
 	unregister_switchdev_blocking_notifier(&adin1110_switchdev_blocking_notifier);
 	unregister_switchdev_notifier(&adin1110_switchdev_notifier);
 	unregister_netdevice_notifier(&adin1110_netdevice_nb);
 }
 
-static int adin1110_setup_notifiers(struct adin1110_priv *priv)
+static int adin1110_setup_notifiers(void)
 {
-	struct device *dev = &priv->spidev->dev;
 	int ret;
 
 	ret = register_netdevice_notifier(&adin1110_netdevice_nb);
@@ -1536,13 +1552,14 @@ static int adin1110_setup_notifiers(struct adin1110_priv *priv)
 	if (ret < 0)
 		goto err_sdev;
 
-	return devm_add_action_or_reset(dev, adin1110_unregister_notifiers, NULL);
+	return 0;
 
 err_sdev:
 	unregister_switchdev_notifier(&adin1110_switchdev_notifier);
 
 err_netdev:
 	unregister_netdevice_notifier(&adin1110_netdevice_nb);
+
 	return ret;
 }
 
@@ -1582,7 +1599,7 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 		netdev->netdev_ops = &adin1110_netdev_ops;
 		netdev->ethtool_ops = &adin1110_ethtool_ops;
 		netdev->priv_flags |= IFF_UNICAST_FLT;
-		netdev->features |= NETIF_F_NETNS_LOCAL;
+		netdev->netns_immutable = true;
 
 		port_priv->phydev = get_phy_device(priv->mii_bus, i + 1, false);
 		if (IS_ERR(port_priv->phydev)) {
@@ -1610,10 +1627,6 @@ static int adin1110_probe_netdevs(struct adin1110_priv *priv)
 					adin1110_irq,
 					IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 					dev_name(dev), priv);
-	if (ret < 0)
-		return ret;
-
-	ret = adin1110_setup_notifiers(priv);
 	if (ret < 0)
 		return ret;
 
@@ -1693,7 +1706,31 @@ static struct spi_driver adin1110_driver = {
 	.probe = adin1110_probe,
 	.id_table = adin1110_spi_id,
 };
-module_spi_driver(adin1110_driver);
+
+static int __init adin1110_driver_init(void)
+{
+	int ret;
+
+	ret = adin1110_setup_notifiers();
+	if (ret < 0)
+		return ret;
+
+	ret = spi_register_driver(&adin1110_driver);
+	if (ret < 0) {
+		adin1110_unregister_notifiers();
+		return ret;
+	}
+
+	return 0;
+}
+
+static void __exit adin1110_exit(void)
+{
+	adin1110_unregister_notifiers();
+	spi_unregister_driver(&adin1110_driver);
+}
+module_init(adin1110_driver_init);
+module_exit(adin1110_exit);
 
 MODULE_DESCRIPTION("ADIN1110 Network driver");
 MODULE_AUTHOR("Alexandru Tachici <alexandru.tachici@analog.com>");

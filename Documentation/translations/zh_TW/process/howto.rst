@@ -16,7 +16,7 @@
                    鍾宇  TripleX Chung <xxx.phy@gmail.com>
                    陳琦  Maggie Chen <chenqi@beyondsoft.com>
                    王聰  Wang Cong <xiyou.wangcong@gmail.com>
-                   胡皓文 Hu Haowen <src.res@email.cn>
+                   胡皓文 Hu Haowen <2023002089@link.tyut.edu.cn>
 
 如何參與Linux內核開發
 =====================
@@ -48,7 +48,7 @@ Linux內核大部分是由C語言寫成的，一些體系結構相關的代碼�
  - "C:  A Reference Manual" by Harbison and Steele [Prentice Hall]
    《C語言參考手冊（原書第5版）》（邱仲潘 等譯）[機械工業出版社]
 
-Linux內核使用GNU C和GNU工具鏈開發。雖然它遵循ISO C89標準，但也用到了一些
+Linux內核使用GNU C和GNU工具鏈開發。雖然它遵循ISO C11標準，但也用到了一些
 標準中沒有定義的擴展。內核是自給自足的C環境，不依賴於標準C庫的支持，所以
 並不支持C標準中的部分定義。比如long long類型的大數除法和浮點運算就不允許
 使用。有時候確實很難弄清楚內核對工具鏈的要求和它所使用的擴展，不幸的是目
@@ -128,7 +128,7 @@ Linux內核代碼中包含有大量的文檔。這些文檔對於學習如何與
     這篇文檔對於理解Linux的開發哲學至關重要。對於將開發平台從其他操作系
     統轉移到Linux的人來說也很重要。
 
-  :ref:`Documentation/admin-guide/security-bugs.rst <securitybugs>`
+  :ref:`Documentation/process/security-bugs.rst <securitybugs>`
     如果你認爲自己發現了Linux內核的安全性問題，請根據這篇文檔中的步驟來
     提醒其他內核開發者並幫助解決這個問題。
 

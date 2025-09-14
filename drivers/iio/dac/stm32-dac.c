@@ -11,12 +11,13 @@
 #include <linux/delay.h>
 #include <linux/iio/iio.h>
 #include <linux/kernel.h>
+#include <linux/kstrtox.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/string_helpers.h>
+#include <linux/string_choices.h>
 
 #include "stm32-dac-core.h"
 
@@ -249,7 +250,7 @@ static const struct iio_chan_spec_ext_info stm32_dac_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SEPARATE, &stm32_dac_powerdown_mode_en),
 	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &stm32_dac_powerdown_mode_en),
-	{},
+	{ }
 };
 
 #define STM32_DAC_CHANNEL(chan, name) {			\
@@ -361,7 +362,7 @@ err_pm_put:
 	return ret;
 }
 
-static int stm32_dac_remove(struct platform_device *pdev)
+static void stm32_dac_remove(struct platform_device *pdev)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 
@@ -370,8 +371,6 @@ static int stm32_dac_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
 	pm_runtime_put_noidle(&pdev->dev);
-
-	return 0;
 }
 
 static int stm32_dac_suspend(struct device *dev)
@@ -393,7 +392,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(stm32_dac_pm_ops, stm32_dac_suspend,
 
 static const struct of_device_id stm32_dac_of_match[] = {
 	{ .compatible = "st,stm32-dac", },
-	{},
+	{ }
 };
 MODULE_DEVICE_TABLE(of, stm32_dac_of_match);
 

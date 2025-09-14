@@ -92,6 +92,20 @@ enum dmub_status dmub_srv_stat_get_notification(struct dmub_srv *dmub,
 		notify->link_index = cmd.set_config_reply.set_config_reply_control.instance;
 		notify->sc_status = cmd.set_config_reply.set_config_reply_control.status;
 		break;
+	case DMUB_OUT_CMD__DPIA_NOTIFICATION:
+		notify->type = DMUB_NOTIFICATION_DPIA_NOTIFICATION;
+		notify->link_index = cmd.dpia_notification.payload.header.instance;
+		break;
+	case DMUB_OUT_CMD__HPD_SENSE_NOTIFY:
+		notify->type = DMUB_NOTIFICATION_HPD_SENSE_NOTIFY;
+		dmub_memcpy(&notify->hpd_sense_notify,
+			    &cmd.hpd_sense_notify.data,
+			    sizeof(cmd.hpd_sense_notify.data));
+		break;
+	case DMUB_OUT_CMD__FUSED_IO:
+		notify->type = DMUB_NOTIFICATION_FUSED_IO;
+		dmub_memcpy(&notify->fused_request, &cmd.fused_io.request, sizeof(cmd.fused_io.request));
+		break;
 	default:
 		notify->type = DMUB_NOTIFICATION_NO_DATA;
 		break;

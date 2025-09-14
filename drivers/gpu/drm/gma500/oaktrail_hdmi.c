@@ -27,7 +27,9 @@
 #include <linux/delay.h>
 
 #include <drm/drm.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_simple_kms_helper.h>
 
 #include "psb_drv.h"
@@ -512,7 +514,7 @@ static void oaktrail_hdmi_dpms(struct drm_encoder *encoder, int mode)
 }
 
 static enum drm_mode_status oaktrail_hdmi_mode_valid(struct drm_connector *connector,
-				struct drm_display_mode *mode)
+				const struct drm_display_mode *mode)
 {
 	if (mode->clock > 165000)
 		return MODE_CLOCK_HIGH;

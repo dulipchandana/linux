@@ -9,8 +9,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
-#include <linux/of_address.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 
@@ -456,14 +455,12 @@ static int cdns_dphy_probe(struct platform_device *pdev)
 	return PTR_ERR_OR_ZERO(phy_provider);
 }
 
-static int cdns_dphy_remove(struct platform_device *pdev)
+static void cdns_dphy_remove(struct platform_device *pdev)
 {
 	struct cdns_dphy *dphy = dev_get_drvdata(&pdev->dev);
 
 	if (dphy->ops->remove)
 		dphy->ops->remove(dphy);
-
-	return 0;
 }
 
 static const struct of_device_id cdns_dphy_of_match[] = {

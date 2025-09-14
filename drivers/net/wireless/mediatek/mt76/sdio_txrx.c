@@ -46,6 +46,10 @@ static int mt76s_refill_sched_quota(struct mt76_dev *dev, u32 *data)
 		return 0;
 
 	sdio->sched.pse_mcu_quota += pse_mcu_quota;
+	if (sdio->pse_mcu_quota_max &&
+	    sdio->sched.pse_mcu_quota > sdio->pse_mcu_quota_max) {
+		sdio->sched.pse_mcu_quota = sdio->pse_mcu_quota_max;
+	}
 	sdio->sched.pse_data_quota += pse_data_quota;
 	sdio->sched.ple_data_quota += ple_data_quota;
 
@@ -108,6 +112,7 @@ mt76s_rx_run_queue(struct mt76_dev *dev, enum mt76_rxq_id qid,
 
 	if (err < 0) {
 		dev_err(dev->dev, "sdio read data failed:%d\n", err);
+		atomic_set(&dev->bus_hung, true);
 		put_page(page);
 		return err;
 	}
@@ -230,9 +235,10 @@ static int __mt76s_xmit_queue(struct mt76_dev *dev, u8 *data, int len)
 	err = sdio_writesb(sdio->func, MCR_WTDR1, data, len);
 	sdio_release_host(sdio->func);
 
-	if (err)
+	if (err) {
 		dev_err(dev->dev, "sdio write failed: %d\n", err);
-
+		atomic_set(&dev->bus_hung, true);
+	}
 	return err;
 }
 
@@ -254,6 +260,10 @@ static int mt76s_tx_run_queue(struct mt76_dev *dev, struct mt76_queue *q)
 
 		if (!test_bit(MT76_STATE_MCU_RUNNING, &dev->phy.state)) {
 			__skb_put_zero(e->skb, 4);
+			err = __skb_grow(e->skb, roundup(e->skb->len,
+							 sdio->func->cur_blksize));
+			if (err)
+				return err;
 			err = __mt76s_xmit_queue(dev, e->skb->data,
 						 e->skb->len);
 			if (err)

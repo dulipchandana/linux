@@ -329,7 +329,7 @@ static void s3c2410_hcd_oc(struct s3c2410_hcd_info *info, int port_oc)
  * the HCD's stop() method.  It is always called from a thread
  * context, normally "rmmod", "apmd", or something similar.
  */
-static int
+static void
 ohci_hcd_s3c2410_remove(struct platform_device *dev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(dev);
@@ -337,7 +337,6 @@ ohci_hcd_s3c2410_remove(struct platform_device *dev)
 	usb_remove_hcd(hcd);
 	s3c2410_stop_hc(dev);
 	usb_put_hcd(hcd);
-	return 0;
 }
 
 /*

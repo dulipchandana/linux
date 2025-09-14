@@ -369,7 +369,7 @@ static const enum counter_synapse_action ecap_cnt_input_actions[] = {
 };
 
 static struct counter_comp ecap_cnt_clock_ext[] = {
-	COUNTER_COMP_SIGNAL_U64("frequency", ecap_cnt_clk_get_freq, NULL),
+	COUNTER_COMP_FREQUENCY(ecap_cnt_clk_get_freq),
 };
 
 static const enum counter_signal_polarity ecap_cnt_pol_avail[] = {
@@ -377,7 +377,8 @@ static const enum counter_signal_polarity ecap_cnt_pol_avail[] = {
 	COUNTER_SIGNAL_POLARITY_NEGATIVE,
 };
 
-static DEFINE_COUNTER_ARRAY_POLARITY(ecap_cnt_pol_array, ecap_cnt_pol_avail, ECAP_NB_CEVT);
+static DEFINE_COUNTER_AVAILABLE(ecap_cnt_pol_available, ecap_cnt_pol_avail);
+static DEFINE_COUNTER_ARRAY_POLARITY(ecap_cnt_pol_array, ecap_cnt_pol_available, ECAP_NB_CEVT);
 
 static struct counter_comp ecap_cnt_signal_ext[] = {
 	COUNTER_COMP_ARRAY_POLARITY(ecap_cnt_pol_read, ecap_cnt_pol_write, ecap_cnt_pol_array),
@@ -479,8 +480,8 @@ static int ecap_cnt_probe(struct platform_device *pdev)
 	int ret;
 
 	counter_dev = devm_counter_alloc(dev, sizeof(*ecap_dev));
-	if (IS_ERR(counter_dev))
-		return PTR_ERR(counter_dev);
+	if (!counter_dev)
+		return -ENOMEM;
 
 	counter_dev->name = ECAP_DRV_NAME;
 	counter_dev->parent = dev;
@@ -536,15 +537,13 @@ static int ecap_cnt_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int ecap_cnt_remove(struct platform_device *pdev)
+static void ecap_cnt_remove(struct platform_device *pdev)
 {
 	struct counter_device *counter_dev = platform_get_drvdata(pdev);
 	struct ecap_cnt_dev *ecap_dev = counter_priv(counter_dev);
 
 	if (ecap_dev->enabled)
 		ecap_cnt_capture_disable(counter_dev);
-
-	return 0;
 }
 
 static int ecap_cnt_suspend(struct device *dev)
@@ -575,8 +574,13 @@ static int ecap_cnt_resume(struct device *dev)
 {
 	struct counter_device *counter_dev = dev_get_drvdata(dev);
 	struct ecap_cnt_dev *ecap_dev = counter_priv(counter_dev);
+	int ret;
 
-	clk_enable(ecap_dev->clk);
+	ret = clk_enable(ecap_dev->clk);
+	if (ret) {
+		dev_err(dev, "Cannot enable clock %d\n", ret);
+		return ret;
+	}
 
 	ecap_cnt_capture_set_evmode(counter_dev, ecap_dev->pm_ctx.ev_mode);
 
@@ -611,4 +615,4 @@ module_platform_driver(ecap_cnt_driver);
 MODULE_DESCRIPTION("ECAP Capture driver");
 MODULE_AUTHOR("Julien Panis <jpanis@baylibre.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(COUNTER);
+MODULE_IMPORT_NS("COUNTER");

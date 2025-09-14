@@ -27,7 +27,7 @@ MODULE_PARM_DESC(bmcaddr, "Address to use for BMC.");
 
 static unsigned int retry_time_ms = 250;
 module_param(retry_time_ms, uint, 0644);
-MODULE_PARM_DESC(max_retries, "Timeout time between retries, in milliseconds.");
+MODULE_PARM_DESC(retry_time_ms, "Timeout time between retries, in milliseconds.");
 
 static unsigned int max_retries = 1;
 module_param(max_retries, uint, 0644);
@@ -561,8 +561,8 @@ MODULE_DEVICE_TABLE(of, of_ipmi_ipmb_match);
 #endif
 
 static const struct i2c_device_id ipmi_ipmb_id[] = {
-	{ DEVICE_NAME, 0 },
-	{},
+	{ DEVICE_NAME },
+	{}
 };
 MODULE_DEVICE_TABLE(i2c, ipmi_ipmb_id);
 
@@ -572,7 +572,7 @@ static struct i2c_driver ipmi_ipmb_driver = {
 		.name = DEVICE_NAME,
 		.of_match_table = of_ipmi_ipmb_match,
 	},
-	.probe_new	= ipmi_ipmb_probe,
+	.probe		= ipmi_ipmb_probe,
 	.remove		= ipmi_ipmb_remove,
 	.id_table	= ipmi_ipmb_id,
 };

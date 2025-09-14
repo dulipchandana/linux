@@ -5,17 +5,6 @@
  * Copyright (c) 2010 Intel Corporation. All Rights Reserved.
  *
  * Copyright (c) 2010 Silicon Hive www.siliconhive.com.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- *
  */
 
 #ifndef	__HMM_BO_H__
@@ -65,9 +54,6 @@
 #define	check_bo_null_return_void(bo)	\
 	check_null_return_void(bo, "NULL hmm buffer object.\n")
 
-#define	HMM_MAX_ORDER		3
-#define	HMM_MIN_ORDER		0
-
 #define	ISP_VM_START	0x0
 #define	ISP_VM_SIZE	(0x7FFFFFFF)	/* 2G address space */
 #define	ISP_PTR_NULL	NULL
@@ -76,7 +62,7 @@
 
 enum hmm_bo_type {
 	HMM_BO_PRIVATE,
-	HMM_BO_USER,
+	HMM_BO_VMALLOC,
 	HMM_BO_LAST,
 };
 
@@ -89,8 +75,6 @@ enum hmm_bo_type {
 #define	HMM_BO_VMAPED		0x10
 #define	HMM_BO_VMAPED_CACHED	0x20
 #define	HMM_BO_ACTIVE		0x1000
-#define	HMM_BO_MEM_TYPE_USER     0x1
-#define	HMM_BO_MEM_TYPE_PFN      0x2
 
 struct hmm_bo_device {
 	struct isp_mmu		mmu;
@@ -126,7 +110,6 @@ struct hmm_buffer_object {
 	enum hmm_bo_type	type;
 	int		mmap_count;
 	int		status;
-	int		mem_type;
 	void		*vmap_addr; /* kernel virtual address by vmap */
 
 	struct rb_node	node;
@@ -165,12 +148,12 @@ void hmm_bo_device_exit(struct hmm_bo_device *bdev);
 int hmm_bo_device_inited(struct hmm_bo_device *bdev);
 
 /*
- * increse buffer object reference.
+ * increase buffer object reference.
  */
 void hmm_bo_ref(struct hmm_buffer_object *bo);
 
 /*
- * decrese buffer object reference. if reference reaches 0,
+ * decrease buffer object reference. if reference reaches 0,
  * release function of the buffer object will be called.
  *
  * this call is also used to release hmm_buffer_object or its
@@ -213,7 +196,7 @@ int hmm_bo_allocated(struct hmm_buffer_object *bo);
  */
 int hmm_bo_alloc_pages(struct hmm_buffer_object *bo,
 		       enum hmm_bo_type type,
-		       const void __user *userptr);
+		       void *vmalloc_addr);
 void hmm_bo_free_pages(struct hmm_buffer_object *bo);
 int hmm_bo_page_allocated(struct hmm_buffer_object *bo);
 

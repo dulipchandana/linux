@@ -951,9 +951,9 @@ static int snd_ps3_driver_probe(struct ps3_system_bus_device *dev)
 	if (ret < 0)
 		goto clean_irq;
 
-	strcpy(the_card.card->driver, "PS3");
-	strcpy(the_card.card->shortname, "PS3");
-	strcpy(the_card.card->longname, "PS3 sound");
+	strscpy(the_card.card->driver, "PS3");
+	strscpy(the_card.card->shortname, "PS3");
+	strscpy(the_card.card->longname, "PS3 sound");
 
 	/* create control elements */
 	for (i = 0; i < ARRAY_SIZE(spdif_ctls); i++) {
@@ -975,7 +975,7 @@ static int snd_ps3_driver_probe(struct ps3_system_bus_device *dev)
 		goto clean_card;
 
 	the_card.pcm->private_data = &the_card;
-	strcpy(the_card.pcm->name, "SPDIF");
+	strscpy(the_card.pcm->name, "SPDIF");
 
 	/* set pcm ops */
 	snd_pcm_set_ops(the_card.pcm, SNDRV_PCM_STREAM_PLAYBACK,
@@ -1046,16 +1046,13 @@ clean_open:
 /* called when module removal */
 static void snd_ps3_driver_remove(struct ps3_system_bus_device *dev)
 {
-	int ret;
 	pr_info("%s:start id=%d\n", __func__,  dev->match_id);
 
 	/*
 	 * ctl and preallocate buffer will be freed in
 	 * snd_card_free
 	 */
-	ret = snd_card_free(the_card.card);
-	if (ret)
-		pr_info("%s: ctl freecard=%d\n", __func__, ret);
+	snd_card_free(the_card.card);
 
 	dma_free_coherent(&dev->core,
 			  PAGE_SIZE,

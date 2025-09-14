@@ -1020,7 +1020,7 @@ static int wl1273_fm_set_rds(struct wl1273_device *radio, unsigned int new_mode)
 	}
 
 	if (!r)
-		radio->rds_on = (new_mode == WL1273_RDS_ON) ? true : false;
+		radio->rds_on = new_mode == WL1273_RDS_ON;
 
 	return r;
 }
@@ -1407,7 +1407,7 @@ static inline struct wl1273_device *to_radio(struct v4l2_ctrl *ctrl)
 	return container_of(ctrl->handler, struct wl1273_device, ctrl_handler);
 }
 
-static int wl1273_fm_vidioc_s_ctrl(struct v4l2_ctrl *ctrl)
+static int wl1273_fm_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct wl1273_device *radio = to_radio(ctrl);
 	struct wl1273_core *core = radio->core;
@@ -1945,7 +1945,7 @@ static void wl1273_vdev_release(struct video_device *dev)
 }
 
 static const struct v4l2_ctrl_ops wl1273_ctrl_ops = {
-	.s_ctrl = wl1273_fm_vidioc_s_ctrl,
+	.s_ctrl = wl1273_fm_s_ctrl,
 	.g_volatile_ctrl = wl1273_fm_g_volatile_ctrl,
 };
 
@@ -1977,7 +1977,7 @@ static const struct video_device wl1273_viddev_template = {
 				  V4L2_CAP_RDS_OUTPUT,
 };
 
-static int wl1273_fm_radio_remove(struct platform_device *pdev)
+static void wl1273_fm_radio_remove(struct platform_device *pdev)
 {
 	struct wl1273_device *radio = platform_get_drvdata(pdev);
 	struct wl1273_core *core = radio->core;
@@ -1990,8 +1990,6 @@ static int wl1273_fm_radio_remove(struct platform_device *pdev)
 	v4l2_ctrl_handler_free(&radio->ctrl_handler);
 	video_unregister_device(&radio->videodev);
 	v4l2_device_unregister(&radio->v4l2dev);
-
-	return 0;
 }
 
 static int wl1273_fm_radio_probe(struct platform_device *pdev)

@@ -6,7 +6,10 @@
  * Copyright (C) 2004 Intel Corporation <matthew.e.tolentino@intel.com>
  */
 
+#define pr_fmt(fmt) "efivars: " fmt
+
 #include <linux/types.h>
+#include <linux/sizes.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -18,74 +21,76 @@
 /* Private pointer to registered efivars */
 static struct efivars *__efivars;
 
-static DEFINE_SEMAPHORE(efivars_lock);
+static DEFINE_SEMAPHORE(efivars_lock, 1);
 
-efi_status_t check_var_size(u32 attributes, unsigned long size)
+static efi_status_t check_var_size(bool nonblocking, u32 attributes,
+				   unsigned long size)
 {
 	const struct efivar_operations *fops;
+	efi_status_t status;
 
 	fops = __efivars->ops;
 
 	if (!fops->query_variable_store)
-		return EFI_UNSUPPORTED;
-
-	return fops->query_variable_store(attributes, size, false);
+		status = EFI_UNSUPPORTED;
+	else
+		status = fops->query_variable_store(attributes, size,
+						    nonblocking);
+	if (status == EFI_UNSUPPORTED)
+		return (size <= SZ_64K) ? EFI_SUCCESS : EFI_OUT_OF_RESOURCES;
+	return status;
 }
-EXPORT_SYMBOL_NS_GPL(check_var_size, EFIVAR);
-
-efi_status_t check_var_size_nonblocking(u32 attributes, unsigned long size)
-{
-	const struct efivar_operations *fops;
-
-	fops = __efivars->ops;
-
-	if (!fops->query_variable_store)
-		return EFI_UNSUPPORTED;
-
-	return fops->query_variable_store(attributes, size, true);
-}
-EXPORT_SYMBOL_NS_GPL(check_var_size_nonblocking, EFIVAR);
 
 /**
- * efivars_kobject - get the kobject for the registered efivars
+ * efivar_is_available - check if efivars is available
  *
- * If efivars_register() has not been called we return NULL,
- * otherwise return the kobject used at registration time.
+ * @return true iff evivars is currently registered
  */
-struct kobject *efivars_kobject(void)
+bool efivar_is_available(void)
 {
-	if (!__efivars)
-		return NULL;
-
-	return __efivars->kobject;
+	return __efivars != NULL;
 }
-EXPORT_SYMBOL_GPL(efivars_kobject);
+EXPORT_SYMBOL_GPL(efivar_is_available);
 
 /**
  * efivars_register - register an efivars
  * @efivars: efivars to register
  * @ops: efivars operations
- * @kobject: @efivars-specific kobject
  *
  * Only a single efivars can be registered at any time.
  */
 int efivars_register(struct efivars *efivars,
-		     const struct efivar_operations *ops,
-		     struct kobject *kobject)
+		     const struct efivar_operations *ops)
 {
+	int rv;
+	int event;
+
 	if (down_interruptible(&efivars_lock))
 		return -EINTR;
 
+	if (__efivars) {
+		pr_warn("efivars already registered\n");
+		rv = -EBUSY;
+		goto out;
+	}
+
 	efivars->ops = ops;
-	efivars->kobject = kobject;
 
 	__efivars = efivars;
 
-	pr_info("Registered efivars operations\n");
+	if (efivar_supports_writes())
+		event = EFIVAR_OPS_RDWR;
+	else
+		event = EFIVAR_OPS_RDONLY;
 
+	blocking_notifier_call_chain(&efivar_ops_nh, event, NULL);
+
+	pr_info("Registered efivars operations\n");
+	rv = 0;
+out:
 	up(&efivars_lock);
 
-	return 0;
+	return rv;
 }
 EXPORT_SYMBOL_GPL(efivars_register);
 
@@ -104,7 +109,7 @@ int efivars_unregister(struct efivars *efivars)
 		return -EINTR;
 
 	if (!__efivars) {
-		printk(KERN_ERR "efivars not registered\n");
+		pr_err("efivars not registered\n");
 		rv = -EINVAL;
 		goto out;
 	}
@@ -124,7 +129,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(efivars_unregister);
 
-int efivar_supports_writes(void)
+bool efivar_supports_writes(void)
 {
 	return __efivars && __efivars->ops->set_variable;
 }
@@ -144,7 +149,7 @@ int efivar_lock(void)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(efivar_lock, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_lock, "EFIVAR");
 
 /*
  * efivar_lock() - obtain the efivar lock if it is free
@@ -160,7 +165,7 @@ int efivar_trylock(void)
 	}
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(efivar_trylock, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_trylock, "EFIVAR");
 
 /*
  * efivar_unlock() - release the efivar lock
@@ -169,7 +174,7 @@ void efivar_unlock(void)
 {
 	up(&efivars_lock);
 }
-EXPORT_SYMBOL_NS_GPL(efivar_unlock, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_unlock, "EFIVAR");
 
 /*
  * efivar_get_variable() - retrieve a variable identified by name/vendor
@@ -181,7 +186,7 @@ efi_status_t efivar_get_variable(efi_char16_t *name, efi_guid_t *vendor,
 {
 	return __efivars->ops->get_variable(name, vendor, attr, size, data);
 }
-EXPORT_SYMBOL_NS_GPL(efivar_get_variable, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_get_variable, "EFIVAR");
 
 /*
  * efivar_get_next_variable() - enumerate the next name/vendor pair
@@ -193,27 +198,7 @@ efi_status_t efivar_get_next_variable(unsigned long *name_size,
 {
 	return __efivars->ops->get_next_variable(name_size, name, vendor);
 }
-EXPORT_SYMBOL_NS_GPL(efivar_get_next_variable, EFIVAR);
-
-/*
- * efivar_set_variable_blocking() - local helper function for set_variable
- *
- * Must be called with efivars_lock held.
- */
-static efi_status_t
-efivar_set_variable_blocking(efi_char16_t *name, efi_guid_t *vendor,
-			     u32 attr, unsigned long data_size, void *data)
-{
-	efi_status_t status;
-
-	if (data_size > 0) {
-		status = check_var_size(attr, data_size +
-					      ucs2_strsize(name, 1024));
-		if (status != EFI_SUCCESS)
-			return status;
-	}
-	return __efivars->ops->set_variable(name, vendor, attr, data_size, data);
-}
+EXPORT_SYMBOL_NS_GPL(efivar_get_next_variable, "EFIVAR");
 
 /*
  * efivar_set_variable_locked() - set a variable identified by name/vendor
@@ -228,26 +213,24 @@ efi_status_t efivar_set_variable_locked(efi_char16_t *name, efi_guid_t *vendor,
 	efi_set_variable_t *setvar;
 	efi_status_t status;
 
-	if (!nonblocking)
-		return efivar_set_variable_blocking(name, vendor, attr,
-						    data_size, data);
+	if (data_size > 0) {
+		status = check_var_size(nonblocking, attr,
+					data_size + ucs2_strsize(name, EFI_VAR_NAME_LEN));
+		if (status != EFI_SUCCESS)
+			return status;
+	}
 
 	/*
 	 * If no _nonblocking variant exists, the ordinary one
 	 * is assumed to be non-blocking.
 	 */
-	setvar = __efivars->ops->set_variable_nonblocking ?:
-		 __efivars->ops->set_variable;
+	setvar = __efivars->ops->set_variable_nonblocking;
+	if (!setvar || !nonblocking)
+		 setvar = __efivars->ops->set_variable;
 
-	if (data_size > 0) {
-		status = check_var_size_nonblocking(attr, data_size +
-							  ucs2_strsize(name, 1024));
-		if (status != EFI_SUCCESS)
-			return status;
-	}
 	return setvar(name, vendor, attr, data_size, data);
 }
-EXPORT_SYMBOL_NS_GPL(efivar_set_variable_locked, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_set_variable_locked, "EFIVAR");
 
 /*
  * efivar_set_variable() - set a variable identified by name/vendor
@@ -264,8 +247,21 @@ efi_status_t efivar_set_variable(efi_char16_t *name, efi_guid_t *vendor,
 	if (efivar_lock())
 		return EFI_ABORTED;
 
-	status = efivar_set_variable_blocking(name, vendor, attr, data_size, data);
+	status = efivar_set_variable_locked(name, vendor, attr, data_size,
+					    data, false);
 	efivar_unlock();
 	return status;
 }
-EXPORT_SYMBOL_NS_GPL(efivar_set_variable, EFIVAR);
+EXPORT_SYMBOL_NS_GPL(efivar_set_variable, "EFIVAR");
+
+efi_status_t efivar_query_variable_info(u32 attr,
+					u64 *storage_space,
+					u64 *remaining_space,
+					u64 *max_variable_size)
+{
+	if (!__efivars->ops->query_variable_info)
+		return EFI_UNSUPPORTED;
+	return __efivars->ops->query_variable_info(attr, storage_space,
+			remaining_space, max_variable_size);
+}
+EXPORT_SYMBOL_NS_GPL(efivar_query_variable_info, "EFIVAR");

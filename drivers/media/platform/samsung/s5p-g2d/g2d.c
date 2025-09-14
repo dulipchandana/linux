@@ -133,8 +133,6 @@ static const struct vb2_ops g2d_qops = {
 	.queue_setup	= g2d_queue_setup,
 	.buf_prepare	= g2d_buf_prepare,
 	.buf_queue	= g2d_buf_queue,
-	.wait_prepare	= vb2_ops_wait_prepare,
-	.wait_finish	= vb2_ops_wait_finish,
 };
 
 static int queue_init(void *priv, struct vb2_queue *src_vq,
@@ -740,7 +738,7 @@ put_clk:
 	return ret;
 }
 
-static int g2d_remove(struct platform_device *pdev)
+static void g2d_remove(struct platform_device *pdev)
 {
 	struct g2d_dev *dev = platform_get_drvdata(pdev);
 
@@ -753,7 +751,6 @@ static int g2d_remove(struct platform_device *pdev)
 	clk_put(dev->gate);
 	clk_unprepare(dev->clk);
 	clk_put(dev->clk);
-	return 0;
 }
 
 static struct g2d_variant g2d_drvdata_v3x = {

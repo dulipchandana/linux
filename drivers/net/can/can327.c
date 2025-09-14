@@ -263,8 +263,10 @@ static void can327_feed_frame_to_netdev(struct can327 *elm, struct sk_buff *skb)
 {
 	lockdep_assert_held(&elm->lock);
 
-	if (!netif_running(elm->dev))
+	if (!netif_running(elm->dev)) {
+		kfree_skb(skb);
 		return;
+	}
 
 	/* Queue for NAPI pickup.
 	 * rx-offload will update stats and LEDs for us.
@@ -794,9 +796,9 @@ static int can327_netdev_close(struct net_device *dev)
 
 	netif_stop_queue(dev);
 
-	/* Give UART one final chance to flush. */
-	clear_bit(TTY_DO_WRITE_WAKEUP, &elm->tty->flags);
-	flush_work(&elm->tx_work);
+	/* We don't flush the UART TX queue here, as we want final stop
+	 * commands (like the above dummy char) to be flushed out.
+	 */
 
 	can_rx_offload_disable(&elm->offload);
 	elm->can.state = CAN_STATE_STOPPED;
@@ -813,7 +815,7 @@ static netdev_tx_t can327_netdev_start_xmit(struct sk_buff *skb,
 	struct can327 *elm = netdev_priv(dev);
 	struct can_frame *frame = (struct can_frame *)skb->data;
 
-	if (can_dropped_invalid_skb(dev, skb))
+	if (can_dev_dropped_skb(dev, skb))
 		return NETDEV_TX_OK;
 
 	/* We shouldn't get here after a hardware fault:
@@ -883,10 +885,10 @@ static bool can327_is_valid_rx_char(u8 c)
  * This will not be re-entered while running, but other ldisc
  * functions may be called in parallel.
  */
-static void can327_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
-			    const char *fp, int count)
+static void can327_ldisc_rx(struct tty_struct *tty, const u8 *cp,
+			    const u8 *fp, size_t count)
 {
-	struct can327 *elm = (struct can327 *)tty->disc_data;
+	struct can327 *elm = tty->disc_data;
 	size_t first_new_char_idx;
 
 	if (elm->uart_side_failure)
@@ -899,15 +901,17 @@ static void can327_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 	 */
 	first_new_char_idx = elm->rxfill;
 
-	while (count-- && elm->rxfill < CAN327_SIZE_RXBUF) {
+	while (count--) {
+		if (elm->rxfill >= CAN327_SIZE_RXBUF) {
+			netdev_err(elm->dev,
+				   "Receive buffer overflowed. Bad chip or wiring? count = %zu",
+				   count);
+			goto uart_failure;
+		}
 		if (fp && *fp++) {
 			netdev_err(elm->dev,
 				   "Error in received character stream. Check your wiring.");
-
-			can327_uart_side_failure(elm);
-
-			spin_unlock_bh(&elm->lock);
-			return;
+			goto uart_failure;
 		}
 
 		/* Ignore NUL characters, which the PIC microcontroller may
@@ -923,10 +927,7 @@ static void can327_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 				netdev_err(elm->dev,
 					   "Received illegal character %02x.\n",
 					   *cp);
-				can327_uart_side_failure(elm);
-
-				spin_unlock_bh(&elm->lock);
-				return;
+				goto uart_failure;
 			}
 
 			elm->rxbuf[elm->rxfill++] = *cp;
@@ -935,18 +936,12 @@ static void can327_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 		cp++;
 	}
 
-	if (count >= 0) {
-		netdev_err(elm->dev,
-			   "Receive buffer overflowed. Bad chip or wiring? count = %i",
-			   count);
-
-		can327_uart_side_failure(elm);
-
-		spin_unlock_bh(&elm->lock);
-		return;
-	}
-
 	can327_parse_rxbuf(elm, first_new_char_idx);
+	spin_unlock_bh(&elm->lock);
+
+	return;
+uart_failure:
+	can327_uart_side_failure(elm);
 	spin_unlock_bh(&elm->lock);
 }
 
@@ -988,7 +983,7 @@ static void can327_ldisc_tx_worker(struct work_struct *work)
 /* Called by the driver when there's room for more data. */
 static void can327_ldisc_tx_wakeup(struct tty_struct *tty)
 {
-	struct can327 *elm = (struct can327 *)tty->disc_data;
+	struct can327 *elm = tty->disc_data;
 
 	schedule_work(&elm->tx_work);
 }
@@ -1065,13 +1060,16 @@ static int can327_ldisc_open(struct tty_struct *tty)
  */
 static void can327_ldisc_close(struct tty_struct *tty)
 {
-	struct can327 *elm = (struct can327 *)tty->disc_data;
+	struct can327 *elm = tty->disc_data;
 
-	/* unregister_netdev() calls .ndo_stop() so we don't have to.
-	 * Our .ndo_stop() also flushes the TTY write wakeup handler,
-	 * so we can safely set elm->tty = NULL after this.
-	 */
+	/* unregister_netdev() calls .ndo_stop() so we don't have to. */
 	unregister_candev(elm->dev);
+
+	/* Give UART one final chance to flush.
+	 * No need to clear TTY_DO_WRITE_WAKEUP since .write_wakeup() is
+	 * serialised against .close() and will not be called once we return.
+	 */
+	flush_work(&elm->tx_work);
 
 	/* Mark channel as dead */
 	spin_lock_bh(&elm->lock);
@@ -1087,7 +1085,7 @@ static void can327_ldisc_close(struct tty_struct *tty)
 static int can327_ldisc_ioctl(struct tty_struct *tty, unsigned int cmd,
 			      unsigned long arg)
 {
-	struct can327 *elm = (struct can327 *)tty->disc_data;
+	struct can327 *elm = tty->disc_data;
 	unsigned int tmp;
 
 	switch (cmd) {

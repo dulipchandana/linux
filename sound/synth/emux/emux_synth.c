@@ -190,7 +190,7 @@ snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
  */
 void snd_emux_timer_callback(struct timer_list *t)
 {
-	struct snd_emux *emu = from_timer(emu, t, tlist);
+	struct snd_emux *emu = timer_container_of(emu, t, tlist);
 	struct snd_emux_voice *vp;
 	unsigned long flags;
 	int ch, do_again = 0;
@@ -845,7 +845,8 @@ calc_pitch(struct snd_emux_voice *vp)
 
 	/* 0xe000: root pitch */
 	offset += 0xe000 + vp->reg.rate_offset;
-	offset += vp->emu->pitch_shift;
+	if (vp->emu->ops.get_pitch_shift)
+		offset += vp->emu->ops.get_pitch_shift(vp->emu);
 	LIMITVALUE(offset, 0, 0xffff);
 	if (offset == vp->apitch)
 		return 0; /* unchanged */
@@ -941,9 +942,9 @@ void snd_emux_lock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_OFF)
 		emu->voices[voice].state = SNDRV_EMUX_ST_LOCKED;
 	else
-		snd_printk(KERN_WARNING
-			   "invalid voice for lock %d (state = %x)\n",
-			   voice, emu->voices[voice].state);
+		dev_warn(emu->card->dev,
+			 "invalid voice for lock %d (state = %x)\n",
+			 voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
 
@@ -959,9 +960,9 @@ void snd_emux_unlock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_LOCKED)
 		emu->voices[voice].state = SNDRV_EMUX_ST_OFF;
 	else
-		snd_printk(KERN_WARNING
-			   "invalid voice for unlock %d (state = %x)\n",
-			   voice, emu->voices[voice].state);
+		dev_warn(emu->card->dev,
+			 "invalid voice for unlock %d (state = %x)\n",
+			 voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
 

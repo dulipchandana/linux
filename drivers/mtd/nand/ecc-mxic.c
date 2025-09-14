@@ -18,7 +18,7 @@
 #include <linux/mtd/nand.h>
 #include <linux/mtd/nand-ecc-mxic.h>
 #include <linux/mutex.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -429,6 +429,7 @@ static int mxic_ecc_data_xfer_wait_for_completion(struct mxic_ecc_engine *mxic)
 		mxic_ecc_enable_int(mxic);
 		ret = wait_for_completion_timeout(&mxic->complete,
 						  msecs_to_jiffies(1000));
+		ret = ret ? 0 : -ETIMEDOUT;
 		mxic_ecc_disable_int(mxic);
 	} else {
 		ret = readl_poll_timeout(mxic->regs + INTRPT_STS, val,
@@ -613,7 +614,7 @@ static int mxic_ecc_finish_io_req_external(struct nand_device *nand,
 {
 	struct mxic_ecc_engine *mxic = nand_to_mxic(nand);
 	struct mxic_ecc_ctx *ctx = nand_to_ecc_ctx(nand);
-	int nents, step, ret;
+	int nents, step, ret = 0;
 
 	if (req->mode == MTD_OPS_RAW)
 		return 0;
@@ -722,21 +723,21 @@ static int mxic_ecc_finish_io_req_pipelined(struct nand_device *nand,
 	return ret;
 }
 
-static struct nand_ecc_engine_ops mxic_ecc_engine_external_ops = {
+static const struct nand_ecc_engine_ops mxic_ecc_engine_external_ops = {
 	.init_ctx = mxic_ecc_init_ctx_external,
 	.cleanup_ctx = mxic_ecc_cleanup_ctx,
 	.prepare_io_req = mxic_ecc_prepare_io_req_external,
 	.finish_io_req = mxic_ecc_finish_io_req_external,
 };
 
-static struct nand_ecc_engine_ops mxic_ecc_engine_pipelined_ops = {
+static const struct nand_ecc_engine_ops mxic_ecc_engine_pipelined_ops = {
 	.init_ctx = mxic_ecc_init_ctx_pipelined,
 	.cleanup_ctx = mxic_ecc_cleanup_ctx,
 	.prepare_io_req = mxic_ecc_prepare_io_req_pipelined,
 	.finish_io_req = mxic_ecc_finish_io_req_pipelined,
 };
 
-struct nand_ecc_engine_ops *mxic_ecc_get_pipelined_ops(void)
+const struct nand_ecc_engine_ops *mxic_ecc_get_pipelined_ops(void)
 {
 	return &mxic_ecc_engine_pipelined_ops;
 }
@@ -847,13 +848,11 @@ static int mxic_ecc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int mxic_ecc_remove(struct platform_device *pdev)
+static void mxic_ecc_remove(struct platform_device *pdev)
 {
 	struct mxic_ecc_engine *mxic = platform_get_drvdata(pdev);
 
 	nand_ecc_unregister_on_host_hw_engine(&mxic->external_engine);
-
-	return 0;
 }
 
 static const struct of_device_id mxic_ecc_of_ids[] = {
@@ -870,7 +869,7 @@ static struct platform_driver mxic_ecc_driver = {
 		.of_match_table = mxic_ecc_of_ids,
 	},
 	.probe = mxic_ecc_probe,
-	.remove	= mxic_ecc_remove,
+	.remove = mxic_ecc_remove,
 };
 module_platform_driver(mxic_ecc_driver);
 

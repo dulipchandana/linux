@@ -550,10 +550,10 @@ static netdev_tx_t dnet_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	skb_tx_timestamp(skb);
 
+	spin_unlock_irqrestore(&bp->lock, flags);
+
 	/* free the buffer */
 	dev_kfree_skb(skb);
-
-	spin_unlock_irqrestore(&bp->lock, flags);
 
 	return NETDEV_TX_OK;
 }
@@ -841,7 +841,7 @@ err_out_free_dev:
 	return err;
 }
 
-static int dnet_remove(struct platform_device *pdev)
+static void dnet_remove(struct platform_device *pdev)
 {
 
 	struct net_device *dev;
@@ -859,8 +859,6 @@ static int dnet_remove(struct platform_device *pdev)
 		free_irq(dev->irq, dev);
 		free_netdev(dev);
 	}
-
-	return 0;
 }
 
 static struct platform_driver dnet_driver = {

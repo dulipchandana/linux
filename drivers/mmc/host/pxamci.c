@@ -30,7 +30,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gfp.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/soc/pxa/cpu.h>
 
 #include <linux/sizes.h>
@@ -612,16 +611,13 @@ static int pxamci_probe(struct platform_device *pdev)
 	struct resource *r;
 	int ret, irq;
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
 
-	mmc = mmc_alloc_host(sizeof(struct pxamci_host), dev);
-	if (!mmc) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	mmc = devm_mmc_alloc_host(dev, sizeof(*host));
+	if (!mmc)
+		return -ENOMEM;
 
 	mmc->ops = &pxamci_ops;
 
@@ -648,7 +644,7 @@ static int pxamci_probe(struct platform_device *pdev)
 
 	ret = pxamci_of_init(pdev, mmc);
 	if (ret)
-		goto out;
+		return ret;
 
 	host = mmc_priv(mmc);
 	host->mmc = mmc;
@@ -657,9 +653,8 @@ static int pxamci_probe(struct platform_device *pdev)
 
 	host->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(host->clk)) {
-		ret = PTR_ERR(host->clk);
 		host->clk = NULL;
-		goto out;
+		return PTR_ERR(host->clk);
 	}
 
 	host->clkrate = clk_get_rate(host->clk);
@@ -672,7 +667,7 @@ static int pxamci_probe(struct platform_device *pdev)
 
 	ret = pxamci_init_ocr(host);
 	if (ret < 0)
-		goto out;
+		return ret;
 
 	mmc->caps = 0;
 	host->cmdat = 0;
@@ -685,14 +680,12 @@ static int pxamci_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&host->lock);
-	host->res = r;
 	host->imask = MMC_I_MASK_ALL;
 
-	host->base = devm_ioremap_resource(dev, r);
-	if (IS_ERR(host->base)) {
-		ret = PTR_ERR(host->base);
-		goto out;
-	}
+	host->base = devm_platform_get_and_ioremap_resource(pdev, 0, &r);
+	if (IS_ERR(host->base))
+		return PTR_ERR(host->base);
+	host->res = r;
 
 	/*
 	 * Ensure that the host controller is shut down, and setup
@@ -706,16 +699,15 @@ static int pxamci_probe(struct platform_device *pdev)
 	ret = devm_request_irq(dev, irq, pxamci_irq, 0,
 			       DRIVER_NAME, host);
 	if (ret)
-		goto out;
+		return ret;
 
 	platform_set_drvdata(pdev, mmc);
 
 	host->dma_chan_rx = dma_request_chan(dev, "rx");
 	if (IS_ERR(host->dma_chan_rx)) {
-		dev_err(dev, "unable to request rx dma channel\n");
-		ret = PTR_ERR(host->dma_chan_rx);
 		host->dma_chan_rx = NULL;
-		goto out;
+		return dev_err_probe(dev, PTR_ERR(host->dma_chan_rx),
+				     "unable to request rx dma channel\n");
 	}
 
 	host->dma_chan_tx = dma_request_chan(dev, "tx");
@@ -763,23 +755,24 @@ static int pxamci_probe(struct platform_device *pdev)
 			dev_warn(dev, "gpio_ro and get_ro() both defined\n");
 	}
 
-	mmc_add_host(mmc);
+	ret = mmc_add_host(mmc);
+	if (ret) {
+		if (host->pdata && host->pdata->exit)
+			host->pdata->exit(dev, mmc);
+		goto out;
+	}
 
 	return 0;
 
 out:
-	if (host) {
-		if (host->dma_chan_rx)
-			dma_release_channel(host->dma_chan_rx);
-		if (host->dma_chan_tx)
-			dma_release_channel(host->dma_chan_tx);
-	}
-	if (mmc)
-		mmc_free_host(mmc);
+	if (host->dma_chan_rx)
+		dma_release_channel(host->dma_chan_rx);
+	if (host->dma_chan_tx)
+		dma_release_channel(host->dma_chan_tx);
 	return ret;
 }
 
-static int pxamci_remove(struct platform_device *pdev)
+static void pxamci_remove(struct platform_device *pdev)
 {
 	struct mmc_host *mmc = platform_get_drvdata(pdev);
 
@@ -800,11 +793,7 @@ static int pxamci_remove(struct platform_device *pdev)
 		dmaengine_terminate_all(host->dma_chan_tx);
 		dma_release_channel(host->dma_chan_rx);
 		dma_release_channel(host->dma_chan_tx);
-
-		mmc_free_host(mmc);
 	}
-
-	return 0;
 }
 
 static struct platform_driver pxamci_driver = {

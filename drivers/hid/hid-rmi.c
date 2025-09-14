@@ -326,6 +326,8 @@ static int rmi_input_event(struct hid_device *hdev, u8 *data, int size)
 	if (!(test_bit(RMI_STARTED, &hdata->flags)))
 		return 0;
 
+	pm_wakeup_event(hdev->dev.parent, 0);
+
 	local_irq_save(flags);
 
 	rmi_set_attn_data(rmi_dev, data[1], &data[2], size - 2);
@@ -434,7 +436,6 @@ static void rmi_report(struct hid_device *hid, struct hid_report *report)
 		input_sync(field->hidinput->input);
 }
 
-#ifdef CONFIG_PM
 static int rmi_suspend(struct hid_device *hdev, pm_message_t message)
 {
 	struct rmi_data *data = hid_get_drvdata(hdev);
@@ -481,7 +482,6 @@ out:
 	hid_hw_close(hdev);
 	return ret;
 }
-#endif /* CONFIG_PM */
 
 static int rmi_hid_reset(struct rmi_transport_dev *xport, u16 reset_addr)
 {
@@ -772,11 +772,9 @@ static struct hid_driver rmi_driver = {
 	.report			= rmi_report,
 	.input_mapping		= rmi_input_mapping,
 	.input_configured	= rmi_input_configured,
-#ifdef CONFIG_PM
-	.suspend		= rmi_suspend,
-	.resume			= rmi_post_resume,
-	.reset_resume		= rmi_post_resume,
-#endif
+	.suspend		= pm_ptr(rmi_suspend),
+	.resume			= pm_ptr(rmi_post_resume),
+	.reset_resume		= pm_ptr(rmi_post_resume),
 };
 
 module_hid_driver(rmi_driver);

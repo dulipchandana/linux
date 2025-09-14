@@ -221,7 +221,7 @@ static const struct watchdog_info exar_wdt_info = {
 	.options	= WDIOF_KEEPALIVEPING |
 			  WDIOF_SETTIMEOUT |
 			  WDIOF_MAGICCLOSE,
-	.identity	= "Exar/MaxLinear XR28V38x Watchdog",
+	.identity	= "Exar XR28V38x Watchdog",
 };
 
 static const struct watchdog_ops exar_wdt_ops = {
@@ -355,8 +355,10 @@ static int __init exar_wdt_register(struct wdt_priv *priv, const int idx)
 						    &priv->wdt_res, 1,
 						    priv, sizeof(*priv));
 	if (IS_ERR(n->pdev)) {
+		int err = PTR_ERR(n->pdev);
+
 		kfree(n);
-		return PTR_ERR(n->pdev);
+		return err;
 	}
 
 	list_add_tail(&n->list, &pdev_list);

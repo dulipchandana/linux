@@ -20,6 +20,7 @@
  * OF THIS SOFTWARE.
  */
 
+#include <linux/export.h>
 #include <linux/uaccess.h>
 
 #include <drm/drm_drv.h>
@@ -150,10 +151,16 @@ int drm_mode_getresources(struct drm_device *dev, void *data,
 	drm_connector_list_iter_begin(dev, &conn_iter);
 	count = 0;
 	connector_id = u64_to_user_ptr(card_res->connector_id_ptr);
+	/*
+	 * FIXME: the connectors on the list may not be fully initialized yet,
+	 * if the ioctl is called before the connectors are registered. (See
+	 * drm_dev_register()->drm_modeset_register_all() for static and
+	 * drm_connector_dynamic_register() for dynamic connectors.)
+	 * The driver should only get registered after static connectors are
+	 * fully initialized and dynamic connectors should be added to the
+	 * connector list only after fully initializing them.
+	 */
 	drm_for_each_connector_iter(connector, &conn_iter) {
-		if (connector->registration_state != DRM_CONNECTOR_REGISTERED)
-			continue;
-
 		/* only expose writeback connectors if userspace understands them */
 		if (!file_priv->writeback_connectors &&
 		    (connector->connector_type == DRM_MODE_CONNECTOR_WRITEBACK))
@@ -375,6 +382,20 @@ static int drm_mode_create_standard_properties(struct drm_device *dev)
 		return -ENOMEM;
 	dev->mode_config.modifiers_property = prop;
 
+	prop = drm_property_create(dev,
+				   DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_BLOB,
+				   "IN_FORMATS_ASYNC", 0);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.async_modifiers_property = prop;
+
+	prop = drm_property_create(dev,
+				   DRM_MODE_PROP_IMMUTABLE | DRM_MODE_PROP_BLOB,
+				   "SIZE_HINTS", 0);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.size_hints_property = prop;
+
 	return 0;
 }
 
@@ -402,6 +423,8 @@ static void drm_mode_config_init_release(struct drm_device *dev, void *ptr)
  */
 int drmm_mode_config_init(struct drm_device *dev)
 {
+	int ret;
+
 	mutex_init(&dev->mode_config.mutex);
 	drm_modeset_lock_init(&dev->mode_config.connection_mutex);
 	mutex_init(&dev->mode_config.idr_mutex);
@@ -423,7 +446,11 @@ int drmm_mode_config_init(struct drm_device *dev)
 	init_llist_head(&dev->mode_config.connector_free_list);
 	INIT_WORK(&dev->mode_config.connector_free_work, drm_connector_free_work_fn);
 
-	drm_mode_create_standard_properties(dev);
+	ret = drm_mode_create_standard_properties(dev);
+	if (ret) {
+		drm_mode_config_cleanup(dev);
+		return ret;
+	}
 
 	/* Just to be sure */
 	dev->mode_config.num_fb = 0;
@@ -445,6 +472,8 @@ int drmm_mode_config_init(struct drm_device *dev)
 				       &modeset_ctx);
 		if (ret == -EDEADLK)
 			ret = drm_modeset_backoff(&modeset_ctx);
+
+		might_fault();
 
 		ww_acquire_init(&resv_ctx, &reservation_ww_class);
 		ret = dma_resv_lock(&resv, &resv_ctx);
@@ -541,7 +570,7 @@ void drm_mode_config_cleanup(struct drm_device *dev)
 	 */
 	WARN_ON(!list_empty(&dev->mode_config.fb_list));
 	list_for_each_entry_safe(fb, fbt, &dev->mode_config.fb_list, head) {
-		struct drm_printer p = drm_debug_printer("[leaked fb]");
+		struct drm_printer p = drm_dbg_printer(dev, DRM_UT_KMS, "[leaked fb]");
 
 		drm_printf(&p, "framebuffer[%u]:\n", fb->base.id);
 		drm_framebuffer_print_info(&p, 1, fb);

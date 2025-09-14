@@ -12,13 +12,14 @@
 #include <linux/of_platform.h>
 #include <linux/pcs-rzn1-miic.h>
 #include <linux/phylink.h>
+#include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <dt-bindings/net/pcs-rzn1-miic.h>
 
 #define MIIC_PRCMD			0x0
 #define MIIC_ESID_CODE			0x4
 
-#define MIIC_MODCTRL			0x20
+#define MIIC_MODCTRL			0x8
 #define MIIC_MODCTRL_SW_MODE		GENMASK(4, 0)
 
 #define MIIC_CONVCTRL(port)		(0x100 + (port) * 4)
@@ -121,15 +122,11 @@ static const char *index_to_string[MIIC_MODCTRL_CONF_CONV_NUM] = {
  * struct miic - MII converter structure
  * @base: base address of the MII converter
  * @dev: Device associated to the MII converter
- * @clks: Clocks used for this device
- * @nclk: Number of clocks
  * @lock: Lock used for read-modify-write access
  */
 struct miic {
 	void __iomem *base;
 	struct device *dev;
-	struct clk_bulk_data *clks;
-	int nclk;
 	spinlock_t lock;
 };
 
@@ -186,7 +183,7 @@ static void miic_converter_enable(struct miic *miic, int port, int enable)
 	miic_reg_rmw(miic, MIIC_CONVRST, MIIC_CONVRST_PHYIF_RST(port), val);
 }
 
-static int miic_config(struct phylink_pcs *pcs, unsigned int mode,
+static int miic_config(struct phylink_pcs *pcs, unsigned int neg_mode,
 		       phy_interface_t interface,
 		       const unsigned long *advertising, bool permit)
 {
@@ -232,12 +229,12 @@ static int miic_config(struct phylink_pcs *pcs, unsigned int mode,
 	}
 
 	miic_reg_rmw(miic, MIIC_CONVCTRL(port), mask, val);
-	miic_converter_enable(miic_port->miic, miic_port->port, 1);
+	miic_converter_enable(miic, miic_port->port, 1);
 
 	return 0;
 }
 
-static void miic_link_up(struct phylink_pcs *pcs, unsigned int mode,
+static void miic_link_up(struct phylink_pcs *pcs, unsigned int neg_mode,
 			 phy_interface_t interface, int speed, int duplex)
 {
 	struct miic_port *miic_port = phylink_pcs_to_miic_port(pcs);
@@ -271,21 +268,37 @@ static void miic_link_up(struct phylink_pcs *pcs, unsigned int mode,
 		     (MIIC_CONVCTRL_CONV_SPEED | MIIC_CONVCTRL_FULLD), val);
 }
 
-static int miic_validate(struct phylink_pcs *pcs, unsigned long *supported,
-			 const struct phylink_link_state *state)
+static int miic_pre_init(struct phylink_pcs *pcs)
 {
-	if (phy_interface_mode_is_rgmii(state->interface) ||
-	    state->interface == PHY_INTERFACE_MODE_RMII ||
-	    state->interface == PHY_INTERFACE_MODE_MII)
-		return 1;
+	struct miic_port *miic_port = phylink_pcs_to_miic_port(pcs);
+	struct miic *miic = miic_port->miic;
+	u32 val, mask;
 
-	return -EINVAL;
+	/* Start RX clock if required */
+	if (pcs->rxc_always_on) {
+		/* In MII through mode, the clock signals will be driven by the
+		 * external PHY, which might not be initialized yet. Set RMII
+		 * as default mode to ensure that a reference clock signal is
+		 * generated.
+		 */
+		miic_port->interface = PHY_INTERFACE_MODE_RMII;
+
+		val = FIELD_PREP(MIIC_CONVCTRL_CONV_MODE, CONV_MODE_RMII) |
+		      FIELD_PREP(MIIC_CONVCTRL_CONV_SPEED, CONV_MODE_100MBPS);
+		mask = MIIC_CONVCTRL_CONV_MODE | MIIC_CONVCTRL_CONV_SPEED;
+
+		miic_reg_rmw(miic, MIIC_CONVCTRL(miic_port->port), mask, val);
+
+		miic_converter_enable(miic, miic_port->port, 1);
+	}
+
+	return 0;
 }
 
 static const struct phylink_pcs_ops miic_phylink_ops = {
-	.pcs_validate = miic_validate,
 	.pcs_config = miic_config,
 	.pcs_link_up = miic_link_up,
+	.pcs_pre_init = miic_pre_init,
 };
 
 struct phylink_pcs *miic_create(struct device *dev, struct device_node *np)
@@ -317,19 +330,29 @@ struct phylink_pcs *miic_create(struct device *dev, struct device_node *np)
 
 	pdev = of_find_device_by_node(pcs_np);
 	of_node_put(pcs_np);
-	if (!pdev || !platform_get_drvdata(pdev))
+	if (!pdev || !platform_get_drvdata(pdev)) {
+		if (pdev)
+			put_device(&pdev->dev);
 		return ERR_PTR(-EPROBE_DEFER);
+	}
 
 	miic_port = kzalloc(sizeof(*miic_port), GFP_KERNEL);
-	if (!miic_port)
+	if (!miic_port) {
+		put_device(&pdev->dev);
 		return ERR_PTR(-ENOMEM);
+	}
 
 	miic = platform_get_drvdata(pdev);
 	device_link_add(dev, miic->dev, DL_FLAG_AUTOREMOVE_CONSUMER);
+	put_device(&pdev->dev);
 
 	miic_port->miic = miic;
 	miic_port->port = port - 1;
 	miic_port->pcs.ops = &miic_phylink_ops;
+
+	phy_interface_set_rgmii(miic_port->pcs.supported_interfaces);
+	__set_bit(PHY_INTERFACE_MODE_RMII, miic_port->pcs.supported_interfaces);
+	__set_bit(PHY_INTERFACE_MODE_MII, miic_port->pcs.supported_interfaces);
 
 	return &miic_port->pcs;
 }
@@ -440,11 +463,8 @@ static int miic_parse_dt(struct device *dev, u32 *mode_cfg)
 	if (of_property_read_u32(np, "renesas,miic-switch-portin", &conf) == 0)
 		dt_val[0] = conf;
 
-	for_each_child_of_node(np, conv) {
+	for_each_available_child_of_node(np, conv) {
 		if (of_property_read_u32(conv, "reg", &port))
-			continue;
-
-		if (!of_device_is_available(conv))
 			continue;
 
 		if (of_property_read_u32(conv, "renesas,miic-input", &conf) == 0)
@@ -502,11 +522,9 @@ disable_runtime_pm:
 	return ret;
 }
 
-static int miic_remove(struct platform_device *pdev)
+static void miic_remove(struct platform_device *pdev)
 {
 	pm_runtime_put(&pdev->dev);
-
-	return 0;
 }
 
 static const struct of_device_id miic_of_mtable[] = {

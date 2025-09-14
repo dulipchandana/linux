@@ -4,7 +4,6 @@
 
 #include "elevator.h"
 #include "blk-mq.h"
-#include "blk-mq-tag.h"
 
 #define MAX_SCHED_RQ (16 * BLKDEV_DEFAULT_RQ)
 
@@ -17,17 +16,21 @@ bool blk_mq_sched_try_insert_merge(struct request_queue *q, struct request *rq,
 void blk_mq_sched_mark_restart_hctx(struct blk_mq_hw_ctx *hctx);
 void __blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx);
 
-void blk_mq_sched_insert_request(struct request *rq, bool at_head,
-				 bool run_queue, bool async);
-void blk_mq_sched_insert_requests(struct blk_mq_hw_ctx *hctx,
-				  struct blk_mq_ctx *ctx,
-				  struct list_head *list, bool run_queue_async);
-
 void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx);
 
-int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e);
+int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
+		struct elevator_tags *et);
 void blk_mq_exit_sched(struct request_queue *q, struct elevator_queue *e);
 void blk_mq_sched_free_rqs(struct request_queue *q);
+
+struct elevator_tags *blk_mq_alloc_sched_tags(struct blk_mq_tag_set *set,
+		unsigned int nr_hw_queues);
+int blk_mq_alloc_sched_tags_batch(struct xarray *et_table,
+		struct blk_mq_tag_set *set, unsigned int nr_hw_queues);
+void blk_mq_free_sched_tags(struct elevator_tags *et,
+		struct blk_mq_tag_set *set);
+void blk_mq_free_sched_tags_batch(struct xarray *et_table,
+		struct blk_mq_tag_set *set);
 
 static inline void blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx)
 {
@@ -44,7 +47,7 @@ static inline bool
 blk_mq_sched_allow_merge(struct request_queue *q, struct request *rq,
 			 struct bio *bio)
 {
-	if (rq->rq_flags & RQF_ELV) {
+	if (rq->rq_flags & RQF_USE_SCHED) {
 		struct elevator_queue *e = q->elevator;
 
 		if (e->type->ops.allow_merge)
@@ -55,7 +58,7 @@ blk_mq_sched_allow_merge(struct request_queue *q, struct request *rq,
 
 static inline void blk_mq_sched_completed_request(struct request *rq, u64 now)
 {
-	if (rq->rq_flags & RQF_ELV) {
+	if (rq->rq_flags & RQF_USE_SCHED) {
 		struct elevator_queue *e = rq->q->elevator;
 
 		if (e->type->ops.completed_request)
@@ -65,11 +68,11 @@ static inline void blk_mq_sched_completed_request(struct request *rq, u64 now)
 
 static inline void blk_mq_sched_requeue_request(struct request *rq)
 {
-	if (rq->rq_flags & RQF_ELV) {
+	if (rq->rq_flags & RQF_USE_SCHED) {
 		struct request_queue *q = rq->q;
 		struct elevator_queue *e = q->elevator;
 
-		if ((rq->rq_flags & RQF_ELVPRIV) && e->type->ops.requeue_request)
+		if (e->type->ops.requeue_request)
 			e->type->ops.requeue_request(rq);
 	}
 }
